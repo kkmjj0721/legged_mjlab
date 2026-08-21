@@ -1,3 +1,5 @@
+"""Minimal project-level parent for all legged-mjlab tasks."""
+
 from __future__ import annotations
 
 import torch
@@ -6,7 +8,14 @@ from mjlab.envs import ManagerBasedRlEnv
 
 
 class LeggedMjlabEnv(ManagerBasedRlEnv):
-  robot_entity_name = "robot"
+    """Small legged-gym-shaped façade over mjlab's native environment.
+
+    The class intentionally does not implement ``step``.  Physics stepping,
+    action processing, observation computation, reward computation,
+    termination handling and auto-reset remain owned by mjlab.
+    """
+
+    robot_entity_name = "robot"
 
     def get_robot(self):
         """Return the task's robot entity from the official Scene."""
