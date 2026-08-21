@@ -4,17 +4,22 @@ from .base_config import BaseConfig
 
 
 class LeggedMjlabCfg(BaseConfig):
+    """环境与任务的基础配置类
+    """
     class env:
         num_envs = 4096
-        num_observations = 0
-        num_privileged_obs = None
+        num_observations = 45
+        num_privileged_obs = num_observations + 3 + 187        # num_obs + vel + height
         num_actions = 12
         env_spacing = 2.0
         episode_length_s = 20.0
         seed = 42
 
     class init_state:
-        pos = (0.0, 0.0, 0.32)
+        pos = (0.0, 0.0, 1.0)
+        rot = [0.0, 0.0, 0.0, 1.0] # x,y,z,w [quat]
+        lin_vel = [0.0, 0.0, 0.0]  # x,y,z [m/s]
+        ang_vel = [0.0, 0.0, 0.0]  # x,y,z [rad/s]
         default_joint_angles = {}
 
     class control:
