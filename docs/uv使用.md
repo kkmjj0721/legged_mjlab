@@ -6,17 +6,15 @@
 
 ## 1\.安装 UV：
 
-- 安装：
-
-    ```Bash
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-    ```
-
-- 验证：
+本项目的安装文档以已经安装的 uv 为前提。先验证当前命令来自预期的官方包或
+发行版包：
 
     ```Bash
     uv --version
     ```
+
+如果尚未安装，请优先使用操作系统官方包管理器或 uv 官方发布包，并在执行前
+审阅官方文档、包来源和版本。本文不提供未经审阅的远程脚本管道。
 
 ---
 
@@ -32,24 +30,17 @@
     uv python list
     ```
 
-- 安装特定版本 python：
+- 本项目要求 Python 3.11。先检查本机是否已有兼容解释器：
 
     ```Bash
-    # 安装指定具体版本（如 3.11.6，避免版本兼容问题）
-    uv python install 3.11.6
-    
-    # 安装 PyPy 版本（轻量高效，适合生产环境）
-    uv python install pypy3.10
+    uv python find 3.11
     ```
 
-- 设置全局默认 python 版本：
+    本文不提供下载或安装 Python 的命令；如果检查不到解释器，请按操作系统的
+    已审阅流程准备 Python 3.11。uv 不提供全局默认 Python 的项目命令，项目命令
+    应通过 `--python 3.11` 或项目的 `.python-version` 明确选择解释器。
 
-    ```Bash
-    uv python default 3.12
-    python --version *# 输出 Python 3.12.x 即成功*
-    ```
-
-- 固定项目 python 版本：
+- 固定项目 Python 版本（可选）：
 
     - 在项目根目录执行以下命令，会生成 `\.python\-version` 文件，标识项目所需 Python 版本，他人克隆项目后可快速适配：
 
@@ -62,15 +53,8 @@
 - 创建虚拟环境：
 
     ```Markdown
-    # 方式1：创建默认名称（.venv）的虚拟环境（推荐，符合行业规范）
-    uv venv
-    
-    # 方式2：指定 Python 版本创建虚拟环境（如 3.11）
+    # 需要单独创建环境时，明确使用项目要求的 Python 3.11
     uv venv --python 3.11 .venv
-    uv venv --python=3.11 .venv # 两种写法均可
-    
-    # 方式3：创建自定义名称的虚拟环境（区分不同项目）
-    uv venv --python 3.12 .venv312 # 适配 Python 3.12 项目
     ```
 
 - 激活虚拟环境：
@@ -82,7 +66,8 @@
 - 验证虚拟环境是否激活：
 
     ```Bash
-    python -VV *# 查看当前环境的 Python 版本，确认与虚拟环境指定版本一致*
+    python -VV
+    # 查看当前环境的 Python 版本，确认与虚拟环境指定版本一致
     ```
 
 - 退出虚拟环境：
@@ -91,80 +76,52 @@
     deactivate
     ```
 
-### 2\.3 包管理：
+### 2\.3 项目依赖管理：
 
-- 安装包：
+本项目的依赖、版本约束和 accelerator extra 均维护在仓库根目录的
+`pyproject.toml` 中。请从仓库根目录选择一个 extra 同步，两个命令只能二选一：
 
-    ```Bash
-    # 安装最新版本的包（如 requests）
-    uv pip install requests
-    
-    # 安装指定版本的包（避免版本兼容问题）
-    uv pip install requests==2.31.0
-    
-    # 从 requirements.txt 文件批量安装依赖（迁移项目必备）
-    uv pip install -r requirements.txt
-    
-    # 安装包到开发环境（仅开发时使用，如测试工具 pytest）
-    uv pip install --dev pytest
-    ```
+```Bash
+uv sync --python 3.11 --extra cu128
+uv sync --python 3.11 --extra cpu
+```
 
-- 升级或卸载包：
+`cu128` 与 `cpu` 不能在同一环境中混用。不要使用临时包安装命令绕过根项目元数据，
+也不要把不存在的入口或依赖文件写进安装流程。
 
-    ```Bash
-    *# 升级指定包到最新版本*
-    uv pip upgrade requests
-    
-    *# 升级所有已安装的包（谨慎使用，避免版本冲突）*
-    uv pip upgrade --all
-    
-    *# 卸载指定包（彻底删除，无残留）*
-    uv pip uninstall requests
-    ```
+如需查看当前环境而不改变依赖，可使用真实存在的查询命令：
 
-- 导出依赖：
+```Bash
+uv pip list
+uv pip tree
+```
 
-    - 将当前环境的依赖包导出为 `requirements.txt` 文件
-
-    ```Bash
-    *# 导出当前环境所有依赖（包括开发依赖）*
-    uv pip freeze > requirements.txt
-    
-    *# 导出生产环境依赖（排除开发依赖，上线必备）*
-    uv pip freeze --production > requirements.txt
-    ```
+上面的命令只用于查看当前环境；本项目也没有单独的开发依赖入口。依赖变更应先更新
+根 `pyproject.toml`，再重新执行上面的项目同步命令。
 
 ---
 
 ## 3\.其他功能：
 
-- 清理 UV 缓存：
+- 查看缓存位置：
 
     ```Bash
-    uv cache clean
+    uv cache dir
     ```
 
-- 卸载 UV：
+    该命令只用于确认路径。本文不提供自动删除缓存或虚拟环境的命令；如果磁盘
+    管理确实需要清理，请先审阅官方文档和命令展开后的准确目标，再由用户确认
+    后执行。
 
-    ```Bash
-    # 1. 清理缓存和相关文件
-    uv cache clean
-    rm -r "$(uv python dir)"
-    rm -r "$(uv tool dir)"
-    
-    # 2. 删除二进制文件（macOS/Linux）
-    rm ~/.local/bin/uv ~/.local/bin/uvx
-    
-    # 2. 删除二进制文件（Windows）
-    rm $HOME.local\bin\uv.exe
-    rm $HOME.local\bin\uvx.exe
-    ```
+- 卸载或清理 UV：
+
+    本文不提供删除 uv 管理目录、缓存或二进制文件的命令。若确实需要卸载，
+    请先记录 `uv --version` 和安装来源，再按照对应操作系统官方包管理器或 uv
+    官方文档逐项审阅准确路径后执行；不要把项目目录或 uv 管理目录作为未经确认
+    的删除目标。
 
 - 项目初始化：
 
-    ```Bash
-    uv init my_project *# 创建名为 my_project 的项目*
-    cd my_project *# 进入项目目录*
-    ```
-
+    本仓库已经提供根 `pyproject.toml`，不需要再次初始化项目。新项目才需要
+    根据其自身元数据另行规划初始化流程。
 
