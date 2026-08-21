@@ -1,12 +1,16 @@
-"""Compatibility entry point for legacy ``python setup.py`` commands.
+from setuptools import setup, find_packages
 
-The package metadata is maintained in ``pyproject.toml`` (PEP 621).  Keeping
-this file as a metadata-free shim lets older tooling invoke setuptools without
-creating a second dependency declaration.
-"""
+# Minimum dependencies required prior to installation
+INSTALL_REQUIRES = [
+    "mjlab==1.6.0",
+    "mujoco-warp==3.11.0",
+    "scipy==1.17.0"
+]
 
-from setuptools import setup
-
-
-if __name__ == "__main__":
-    setup()
+# Installation operation
+setup(
+    name="legged_mjlab",
+    packages=find_packages(include=["legged_mjlab", "legged_mjlab.*"]),
+    version="0.0.1",
+    install_requires=INSTALL_REQUIRES,
+)
