@@ -18,7 +18,7 @@ class LeggedMjlabCfg(BaseConfig):
         curriculum = False
 
     class commands:
-        resampling_time_range = (3.0, 8.0)
+        resampling_time_range = (5.0, 15.0)
         rel_standing_envs = 0.05
         heading_command = True
         heading_control_stiffness = 0.5
@@ -138,6 +138,17 @@ class LeggedMjlabCfg(BaseConfig):
             ang_vel_xy = -0.05
             torques = -1.0e-4
             action_rate = -0.05
+
+    class noise:
+        add_noise = True
+        noise_level = 1.0 # scales other values
+        class noise_scales:
+            dof_pos = 0.01
+            dof_vel = 1.5
+            lin_vel = 0.1
+            ang_vel = 0.2
+            gravity = 0.05
+            height_measurements = 0.1
 
     class terminations:
         time_out = True
