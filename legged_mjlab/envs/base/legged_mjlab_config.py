@@ -7,23 +7,34 @@ class LeggedMjlabCfg(BaseConfig):
         num_one_step_observations = 45
         history_length = 1
         num_observations = num_one_step_observations * history_length
-        num_privileged_obs = num_one_step_observations + 3 + 187        # num_obs + vel + height
+        num_privileged_obs = None # num_one_step_observations + 3 + 187        # num_obs + vel + height
         num_actions = 12
         env_spacing = 2.0
         episode_length_s = 20.0
+        send_timeouts = True
         seed = 42
 
     class terrain:
         mesh_type = "plane"
         curriculum = False
+        horizontal_scale = 0.1
+        vertical_scale = 0.005
+        border_size = 25.0
+        terrain_proportions = [0.1, 0.1, 0.35, 0.25, 0.2]
+        measure_heights = True
+        measured_points_x = [-0.8, 0.8]
+        measured_points_y = [-0.5, 0.5]
+        num_rows = 10
+        num_cols = 20
 
     class commands:
-        curriculum = True
-        max_curriculum = 3.0
-        resampling_time_range = (5.0, 15.0)
-        rel_standing_envs = 0.05
+        curriculum = False
+        max_curriculum = 1.0
+        num_commands = 4
+        resampling_time_range = [5.0, 15.0]
         heading_command = True
         heading_control_stiffness = 0.5
+        rel_standing_envs = 0.05
 
         class ranges:
             lin_vel_x = (-1.0, 1.0)
@@ -59,14 +70,16 @@ class LeggedMjlabCfg(BaseConfig):
         damping = {}
         action_scale = 0.25
         decimation = 4
-        hip_reduction = 0.5
+        hip_reduction = 1.0
+        clip_actions = 100.0
 
     class asset:
         xml = ""
         name = "robot"
-        body_names = ()
-        # 电枢惯量
-        armature = 0.0
+        foot_name = "foot"
+        penalize_contacts_on = ["thigh", "calf"]
+        terminate_after_contacts_on = ["base"]
+        self_collisions = False
 
     class domain_rand:
         # ---------------------------------- 动力学参数随机化 ---------------------------------- #
@@ -137,10 +150,22 @@ class LeggedMjlabCfg(BaseConfig):
             tracking_ang_vel = 0.8
             lin_vel_z = -2.0
             ang_vel_xy = -0.05
-            dof_torques = -0.0001
+            orientation = -0.2
+            base_height = -1.0
+            torques = -0.0001
+            dof_vel = -0.0
             dof_acc = -2.5e-7
             action_rate = -0.01
             feet_air_time = 1.0
+            collision = -1.0
+            stand_still = -0.5
+            dof_pos_limits = -10.0
+
+        only_positive_rewards = False
+        tracking_sigma = 0.25
+        soft_dof_pos_limit = 0.9
+        base_height_target = 0.35
+        max_contact_force = 100.0
 
     class noise:
         add_noise = True
@@ -161,6 +186,7 @@ class LeggedMjlabCfg(BaseConfig):
         time_out = True
         bad_orientation = True
         bad_orientation_limit_deg = 70.0
+        base_contact = True
 
     class play:
         episode_length_s = 1.0e9
@@ -195,6 +221,7 @@ class LeggedMjlabCfgPPO(BaseConfig):
     class runner:
         policy_class_name = 'ActorCritic'
         algorithm_class_name = 'PPO'
+        runner_class_name = "OnPolicyRunner"
         num_steps_per_env = 24
         max_iterations = 1500
         save_interval = 50
@@ -202,3 +229,5 @@ class LeggedMjlabCfgPPO(BaseConfig):
         experiment_name = "legged_mjlab"
         run_name = ""
         resume = False
+        load_run = "-1"
+        checkpoint = -1

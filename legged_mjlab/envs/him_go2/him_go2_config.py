@@ -1,7 +1,7 @@
 from legged_mjlab.envs.base.legged_mjlab_config import LeggedMjlabCfg, LeggedMjlabCfgPPO
 
 
-class HimGo2RounghCfg( LeggedMjlabCfg ):
+class HimGo2RoughCfg( LeggedMjlabCfg ):
     class env(LeggedMjlabCfg.env):
         num_envs = 4096
         num_one_step_observations = 45
@@ -11,7 +11,12 @@ class HimGo2RounghCfg( LeggedMjlabCfg ):
         num_actions = 12
         env_spacing = 2.0
         episode_length_s = 20.0
+        send_timeouts = True
         seed = 42
+
+    class terrain:
+        mesh_type = "plane"
+        curriculum = False
 
     class init_state(LeggedMjlabCfg.init_state):
         pos = [0.0, 0.0, 0.45]
@@ -43,13 +48,40 @@ class HimGo2RounghCfg( LeggedMjlabCfg ):
         xml = '{LEGGED_MJLAB_ROOT_DIR}/resources/robots/unitree_go2/xmls/go2.xml'
         name = "go2"
         
+class HimGo2CfgPPO(LeggedMjlabCfgPPO):
+    seed = 42
 
-class Go2VelocityCfgPPO(LeggedMjlabCfgPPO):
-    class algorithm( LeggedMjlabCfgPPO.algorithm ):
+    class policy:
+        init_noise_std = 1.0
+        actor_hidden_dims = [512, 256, 128]
+        critic_hidden_dims = [512, 256, 128]
+        activation = "elu"
+        obs_normalization = True
+
+    class algorithm:
+        value_loss_coef = 1.0
+        use_clipped_value_loss = True
+        clip_param = 0.2
         entropy_coef = 0.01
+        num_learning_epochs = 5
+        num_mini_batches = 4 # mini batch size = num_envs*nsteps / nminibatches
+        learning_rate = 1.e-3 #5.e-4
+        schedule = 'adaptive' # could be adaptive, fixed
+        gamma = 0.99
+        lam = 0.95
+        desired_kl = 0.01
+        max_grad_norm = 1.
 
-    class runner( LeggedMjlabCfgPPO.runner ):
-        max_iterations = 5000
-        save_interval = 200
-        experiment_name = 'him_go2'
+    class runner:
+        policy_class_name = 'HIMActorCritic'
+        algorithm_class_name = 'HIMPPO'
+        runner_class_name = "HIMOnPolicyRunner"
+        num_steps_per_env = 100
+        max_iterations = 10000
+        save_interval = 500
+
+        experiment_name = "him_go2"
+        run_name = ""
         resume = False
+        load_run = "-1"
+        checkpoint = -1
