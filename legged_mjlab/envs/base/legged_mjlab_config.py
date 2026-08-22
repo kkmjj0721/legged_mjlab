@@ -156,7 +156,6 @@ class LeggedMjlabCfg(BaseConfig):
     class sim:
         dt = 0.005
         gravity = [0., 0. ,-9.81]
-        
 
     class terminations:
         time_out = True
