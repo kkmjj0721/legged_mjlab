@@ -1,7 +1,3 @@
-"""Minimal project-level parent for all legged-mjlab tasks."""
-
-from __future__ import annotations
-
 import torch
 
 from mjlab.envs import ManagerBasedRlEnv
