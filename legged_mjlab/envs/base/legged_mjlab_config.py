@@ -18,6 +18,8 @@ class LeggedMjlabCfg(BaseConfig):
         curriculum = False
 
     class commands:
+        curriculum = True
+        max_curriculum = 3.0
         resampling_time_range = (5.0, 15.0)
         rel_standing_envs = 0.05
         heading_command = True
@@ -63,8 +65,8 @@ class LeggedMjlabCfg(BaseConfig):
         xml = ""
         name = "robot"
         body_names = ()
+        # 电枢惯量
         armature = 0.0
-        effort_limit = None
 
     class domain_rand:
         # ---------------------------------- 动力学参数随机化 ---------------------------------- #
@@ -131,13 +133,14 @@ class LeggedMjlabCfg(BaseConfig):
 
     class rewards:
         class scales:
-            termination = 0.0
-            tracking_lin_vel = 1.0
-            tracking_ang_vel = 0.5
+            tracking_lin_vel = 1.5
+            tracking_ang_vel = 0.8
             lin_vel_z = -2.0
             ang_vel_xy = -0.05
-            torques = -1.0e-4
-            action_rate = -0.05
+            dof_torques = -0.0001
+            dof_acc = -2.5e-7
+            action_rate = -0.01
+            feet_air_time = 1.0
 
     class noise:
         add_noise = True
@@ -149,6 +152,11 @@ class LeggedMjlabCfg(BaseConfig):
             ang_vel = 0.2
             gravity = 0.05
             height_measurements = 0.1
+
+    class sim:
+        dt = 0.005
+        gravity = [0., 0. ,-9.81]
+        
 
     class terminations:
         time_out = True

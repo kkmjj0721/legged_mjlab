@@ -1,29 +1,19 @@
 import torch
-
+import numpy as np
+from typing import Tuple, Union, Dict
+from rsl_rl.env import VecEnv
 from mjlab.envs import ManagerBasedRlEnv
 
 
-class LeggedMjlabEnv(ManagerBasedRlEnv):
-    """Small legged-gym-shaped façade over mjlab's native environment.
 
-    The class intentionally does not implement ``step``.  Physics stepping,
-    action processing, observation computation, reward computation,
-    termination handling and auto-reset remain owned by mjlab.
+class LeggedMjlabEnv(VecEnv):
     """
+    桥接 mjlab (MuJoCo Warp GPU 仿真) 与 rsl_rl (VecEnv) 的核心环境包装器
+    """
+    def __init__(self, cfg, sim_device="cuda:0", headless=True):
+        self.cfg = cfg
+        self.device = torch.device(sim_device)
 
-    robot_entity_name = "robot"
-
-    def get_robot(self):
-        """Return the task's robot entity from the official Scene."""
-
-        return self.scene[self.robot_entity_name]
-
-    def get_env_origins(self) -> torch.Tensor:
-        """Return per-environment origins owned by the Scene."""
-
-        return self.scene.env_origins
-
-    def reset_idx(self, env_ids: torch.Tensor | None = None) -> None:
-        """Compatibility name for legged-gym-style partial reset calls."""
-
-        self._reset_idx(env_ids)
+        
+    
+    

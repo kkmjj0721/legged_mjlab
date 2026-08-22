@@ -16,11 +16,13 @@
 
 - 通过 Git 克隆仓库：
 
-  ```Bash
-  git clone https://github.com/kkmjj0721/legged_mjlab.git
-  ```
+```
+git clone https://github.com/kkmjj0721/legged_mjlab.git
+```
 
 ### 1\.2 创建虚拟环境并且安装依赖：
+
+- 请先确保自己已安装 cuda
 
 ```Python
 uv venv --python 3.11 .venv

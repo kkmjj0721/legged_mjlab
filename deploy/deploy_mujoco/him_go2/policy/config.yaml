@@ -1,0 +1,54 @@
+him_go1/himloco:
+  model_name: ""
+
+
+  # ----- obs -----
+  # 训练时使用 6 帧历史，每帧 45 维：cmd(3) + ang_vel(3) + gravity(3) + dof_pos(12) + dof_vel(12) + actions(12)
+  num_observations: 45
+  observations: ["commands", "ang_vel", "gravity_vec", "dof_pos", "dof_vel", "actions"]
+  observations_history: [0, 1, 2, 3, 4, 5]  # 0 是当前帧
+  observations_history_priority: "time"     # 时间优先 → 推理时按时间序列堆叠
+
+  # ----- PD ------
+  # motion
+  rl_kp: 40.0
+  rl_kd: 1.0
+
+  # ----- stand ------ 
+  fixed_kp: 60.0
+  fixed_kd: 2.0
+
+  num_dof: 12
+
+  # ----- scale ------
+  action_scale: 0.25
+  hip_scale: 0.125
+  lin_vel_scale: 2.0
+  ang_vel_scale: 0.25
+  dof_pos_scale: 1.0
+  dof_vel_scale: 0.05 
+
+  torque_limits: [23.7, 23.7, 35.55,
+                  23.7, 23.7, 35.55,
+                  23.7, 23.7, 35.55,
+                  23.7, 23.7, 35.55]
+
+  # ----- init_pos ------
+  # 这一部分需要注意对齐实际的关节顺序
+  default_dof_pos: [ 0.1,  0.8, -1.5,                 # FL
+                     -0.1,  1.0, -1.5,                # RL
+                     0.1,  0.8, -1.5,                 # FR
+                     -0.1,  1.0, -1.5]                # RR
+  
+  # ----- start_pos ------
+  # 这一部分为趴下时的 pos，可在仿真中获取关节角度
+  start_pos: [ 0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0,
+               0.0, 0.0, 0.0]
+  
+  dt: 0.005
+  decimation: 4
+
+
+# 这些仅仅为 sim2sim 部分的东西，如需 sim2real 需要添加的可自行添加
