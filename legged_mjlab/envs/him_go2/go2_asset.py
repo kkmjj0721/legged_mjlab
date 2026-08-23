@@ -1,18 +1,16 @@
 """Canonical Go2 robot entity and scene-sensor configuration."""
+from legged_mjlab import LEGGED_MJLAB_ROOT_DIR
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-import math
-import os
-import re
-from typing import Any, Dict, Tuple
+from typing import Any, Dict
+from pathlib import Path
 
 import mujoco
 
 from legged_mjlab.utils.paths import PROJECT_ROOT, resource_path
 from mjlab.actuator import  IdealPdActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
-from mjlab.utils.os import update_assets
 from mjlab.sensor import (
     ContactMatch,
     ContactSensorCfg,
@@ -23,7 +21,7 @@ from mjlab.sensor import (
 from mjlab.utils.spec_config import CollisionCfg
 
 
-from .him_go2_config import HimGo2RoughCfg
+from legged_mjlab.envs.him_go2.him_go2_config import HimGo2RoughCfg
 
 
 class Go2Asset:
@@ -34,10 +32,32 @@ class Go2Asset:
         self.entity = self.entitycfg(self)
         self.sensor_mgr = self.sensor(self)
 
+    def _resolve_xml_path(self, raw_path: str) -> Path:
+        """解析 MJCF 路径：替换占位符、解析绝对路径并校验存在性"""
+        if not raw_path:
+            raise ValueError("Asset xml 路径未在配置中指定 (cfg.asset.file 为空)")
+
+        # 1. 兼容多种占位符格式与相对路径
+        formatted_path = raw_path.format(
+            LEGGED_MJLAB_ROOT_DIR=str(PROJECT_ROOT)
+        ).replace("{LEGGED_MJLAB_ROOT_DIR}", str(PROJECT_ROOT))
+
+        # 2. 转换为 Path 并获取规范绝对路径
+        xml_path = Path(formatted_path).expanduser().resolve()
+
+        # 3. 校验目标文件是否存在
+        if not xml_path.is_file():
+            raise FileNotFoundError(
+                f"Go2 MJCF 文件不存在，解析路径为: {xml_path}\n"
+                f"原始配置路径: {raw_path}"
+            )
+
+        return xml_path
 
     def _parse_cfg(self, cfg):
-        # 解析文件路径
-        self.xml_path = self.cfg.asset.file
+        # 解析并保存为 Path 对象
+        raw_file = getattr(self.cfg.asset, "file", "")
+        self.xml_path: Path = self._resolve_xml_path(raw_file)
 
         self.effort_limit = self.cfg.control.effort_limit
         self.stiffness = self.cfg.control.stiffness
@@ -65,15 +85,6 @@ class Go2Asset:
     class entitycfg():
         def __init__(self, asset: "Go2Asset"):
             self.asset = asset
-
-        def get_assets(self, meshdir: str) -> dict[str, bytes]:
-            """ 扫描并注入 MJCF 引用的 mesh/texture 外部二进制资源
-            """
-            assets: dict[str, bytes] = {}
-            assets_dir = self.asset.xml_path.parent / "assets"
-            if assets_dir.exists():
-                update_assets(assets, assets_dir, meshdir)
-            return assets
         
         def get_spec(self) -> mujoco.MjSpec:
             """ 解析 MJCF 生成 MjSpec，并完成 assets 资源表绑定。
@@ -140,9 +151,9 @@ class Go2Asset:
             FULL_COLLISION = CollisionCfg(
                 geom_names_expr=(".*_collision",),
                 condim={foot_regex: 3, ".*_collision": 1},
-                priority={foot_regex: 1},
-                friction={foot_regex: (static_friction,)},
-                solimp={foot_regex: (0.9, 0.95, 0.023)},
+                priority={foot_regex: 1, ".*": 0},
+                friction={foot_regex: (static_friction,), ".*": (0.6,)},
+                solimp={foot_regex: (0.9, 0.95, 0.023), ".*": (0.9, 0.95, 0.001)},
                 contype=1,
                 conaffinity=0,
             )
