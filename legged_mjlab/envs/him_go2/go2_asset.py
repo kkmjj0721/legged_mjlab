@@ -31,11 +31,12 @@ class Go2Asset:
         self.cfg = cfg
         self._parse_cfg(self.cfg)
 
-        self.entity = self.EntityCfg(self)
+        self.entity = self.entitycfg(self)
         self.sensor_mgr = self.sensor(self)
 
 
     def _parse_cfg(self, cfg):
+        # 解析文件路径
         self.xml_path = self.cfg.asset.file
 
         self.effort_limit = self.cfg.control.effort_limit
@@ -47,23 +48,21 @@ class Go2Asset:
         self.rot = self.cfg.init_state.rot
         self.default_joint_angles = self.cfg.init_state.default_joint_angles
 
-        self.vel_limit = 
-        self.pos_limit = 
+        self.vel_limit = self.cfg.rewards.soft_dof_vel_limit
+        self.pos_limit = self.cfg.rewards.soft_dof_pos_limit
 
         if self.cfg.domain_rand.randomize_cmd_action_latency:
-
             self.action_delay = self.cfg.domain_rand.range_cmd_action_latency
             self.action_delay_min = self.action_delay[0]
             self.action_delay_max = self.action_delay[1]
             self.action_hold_prob = self.cfg.domain_rand.action_hold_prob
-
         else:
             self.action_delay = 0
             self.action_delay_min = 0
             self.action_delay_max = 0
             self.action_hold_prob = 0
 
-    class EntityCfg():
+    class entitycfg():
         def __init__(self, asset: "Go2Asset"):
             self.asset = asset
 
@@ -81,12 +80,10 @@ class Go2Asset:
             """
             return mujoco.MjSpec.from_file(str(self.asset.xml_path))
 
-        def _get_val(self, param: Any, key: str, default: float) -> float:
+        def _get_val(self, param: Any, key: str) -> float:
             if isinstance(param, Mapping):
-                return float(param.get(key, param.get(".*", default)))
-            elif isinstance(param, (int, float)):
-                return float(param)
-            return default
+                return float(param[key])
+            return float(param)
             
         def add_actuator_cfg(self):
             ACTUATOR_HIP = IdealPdActuatorCfg(
@@ -96,8 +93,9 @@ class Go2Asset:
                 effort_limit = self._get_val(self.asset.effort_limit, "hip"),
                 delay_min_lag = self.asset.action_delay_min,
                 delay_max_lag = self.asset.action_delay_max,
-                delay_hold_prob = self.asset.action_hold_prob,      # 30% chance to keep current lag
-                delay_update_period = 10,       # Resample lag every 10 steps
+                delay_hold_prob = self.asset.action_hold_prob,      
+                delay_update_period = 10,       
+                armature = self.asset.armature,
             )
 
             ACTUATOR_THIGH = IdealPdActuatorCfg(
@@ -107,8 +105,9 @@ class Go2Asset:
                 effort_limit = self._get_val(self.asset.effort_limit, "thigh"),
                 delay_min_lag = self.asset.action_delay_min,
                 delay_max_lag = self.asset.action_delay_max,
-                delay_hold_prob = self.asset.action_hold_prob,      # 30% chance to keep current lag
-                delay_update_period = 10,      
+                delay_hold_prob = self.asset.action_hold_prob,      
+                delay_update_period = 10,  
+                armature = self.asset.armature,
             )
 
             ACTUATOR_CALF = IdealPdActuatorCfg(
@@ -118,8 +117,9 @@ class Go2Asset:
                 effort_limit = self._get_val(self.asset.effort_limit, "calf"),
                 delay_min_lag = self.asset.action_delay_min,
                 delay_max_lag = self.asset.action_delay_max,
-                delay_hold_prob = self.asset.action_hold_prob,      # 30% chance to keep current lag
-                delay_update_period = 10,      
+                delay_hold_prob = self.asset.action_hold_prob,      
+                delay_update_period = 10,   
+                armature = self.asset.armature,
             )
 
             return (ACTUATOR_HIP, ACTUATOR_THIGH, ACTUATOR_CALF)
@@ -149,7 +149,7 @@ class Go2Asset:
 
             ARTICULATION = EntityArticulationInfoCfg(
                 actuators=self.add_actuator_cfg(),
-                soft_joint_pos_limit_factor = self.pos_limit
+                soft_joint_pos_limit_factor = self.asset.pos_limit
             )
 
             return EntityCfg(
@@ -214,3 +214,15 @@ class Go2Asset:
             if getattr(self.asset.cfg.terrain, "measure_heights", False):
                 sensors["height_scan"] = self.get_height_scan_sensor(debug_vis=debug_vis)
             return sensors
+
+
+if __name__ == "__main__":
+    import mujoco.viewer as viewer
+
+    from mjlab.entity.entity import Entity
+
+    Go2_asset = Go2Asset(HimGo2RoughCfg())
+
+    robot = Entity(Go2_asset.entity.get_robot_cfg())
+
+    viewer.launch(robot.spec.compile())
