@@ -1,11 +1,7 @@
-import copy
-import math
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-import torch.distributions as torchd
-from torch.distributions import Normal, Categorical
 
 
 class HIMEstimator(nn.Module):
@@ -62,32 +58,62 @@ class HIMEstimator(nn.Module):
         return vel.detach(), z.detach()
 
     def forward(self, obs_history):
-        parts = self.encoder(obs_history.detach())
+        parts = self.encoder(self._history_input(obs_history).detach())
         vel, z = parts[..., :3], parts[..., 3:]
-        z = F.normalize(z, dim=-1, p=2)
+        z = F.normalize(z, dim=-1, p=2, eps=1e-6)
         return vel.detach(), z.detach()
 
     def encode(self, obs_history):
-        parts = self.encoder(obs_history.detach())
+        parts = self.encoder(self._history_input(obs_history).detach())
         vel, z = parts[..., :3], parts[..., 3:]
-        z = F.normalize(z, dim=-1, p=2)
+        z = F.normalize(z, dim=-1, p=2, eps=1e-6)
         return vel, z
+
+    def _history_input(self, obs_history):
+        if obs_history.ndim != 2:
+            obs_history = obs_history.reshape(obs_history.shape[0], -1)
+        expected = self.temporal_steps * self.num_one_step_obs
+        if obs_history.shape[-1] != expected:
+            raise ValueError(
+                "HIM history observation must have width "
+                f"{expected}, got {obs_history.shape[-1]}"
+            )
+        return obs_history
+
+    def _critic_input(self, critic_obs):
+        if critic_obs.ndim != 2:
+            critic_obs = critic_obs.reshape(critic_obs.shape[0], -1)
+        expected = self.num_one_step_obs + 3
+        if critic_obs.shape[-1] < expected:
+            raise ValueError(
+                "HIM critic observation must contain one-step observation "
+                f"and base velocity ({expected} values), got {critic_obs.shape[-1]}"
+            )
+        return critic_obs
 
     def update(self, obs_history, next_critic_obs, lr=None):
         if lr is not None:
             self.learning_rate = lr
             for param_group in self.optimizer.param_groups:
                 param_group['lr'] = self.learning_rate
-                
-        vel = next_critic_obs[:, self.num_one_step_obs:self.num_one_step_obs+3].detach()
-        next_obs = next_critic_obs.detach()[:, 3:self.num_one_step_obs+3]
+
+        obs_history = self._history_input(obs_history)
+        next_critic_obs = self._critic_input(next_critic_obs)
+
+        # The critic contract is [one-step observation (45), base velocity
+        # (3)].  Keep the target observation in that same order: the previous
+        # implementation treated the first three one-step values as velocity.
+        next_obs = next_critic_obs[..., :self.num_one_step_obs].detach()
+        vel = next_critic_obs[
+            ..., self.num_one_step_obs:self.num_one_step_obs + 3
+        ].detach()
 
         z_s = self.encoder(obs_history)
         z_t = self.target(next_obs)
         pred_vel, z_s = z_s[..., :3], z_s[..., 3:]
 
-        z_s = F.normalize(z_s, dim=-1, p=2)
-        z_t = F.normalize(z_t, dim=-1, p=2)
+        z_s = F.normalize(z_s, dim=-1, p=2, eps=1e-6)
+        z_t = F.normalize(z_t, dim=-1, p=2, eps=1e-6)
 
         with torch.no_grad():
             w = self.proto.weight.data.clone()
@@ -118,17 +144,25 @@ class HIMEstimator(nn.Module):
 
 @torch.no_grad()
 def sinkhorn(out, eps=0.05, iters=3):
-    Q = torch.exp(out / eps).T
+    if eps <= 0:
+        raise ValueError("sinkhorn eps must be positive")
+    if out.ndim != 2:
+        raise ValueError("sinkhorn expects a [batch, prototype] tensor")
+
+    # Softmax is equivalent to the original exponential up to a per-sample
+    # scale, which Sinkhorn removes, while avoiding overflow for large scores.
+    Q = torch.softmax(out / eps, dim=-1).T
     K, B = Q.shape[0], Q.shape[1]
-    Q /= Q.sum()
+    tiny = torch.finfo(Q.dtype).tiny
+    Q /= Q.sum().clamp_min(tiny)
 
     for it in range(iters):
         # normalize each row: total weight per prototype must be 1/K
-        Q /= torch.sum(Q, dim=1, keepdim=True)
+        Q /= torch.sum(Q, dim=1, keepdim=True).clamp_min(tiny)
         Q /= K
 
         # normalize each column: total weight per sample must be 1/B
-        Q /= torch.sum(Q, dim=0, keepdim=True)
+        Q /= torch.sum(Q, dim=0, keepdim=True).clamp_min(tiny)
         Q /= B
     return (Q * B).T
 

@@ -1,5 +1,4 @@
-# 文件：legged_mjlab/__init__.py
-from legged_mjlab import envs
-from legged_mjlab.utils.task_registry import task_registry
+import os
 
-__all__ = ["envs", "task_registry"]
+LEGGED_MJLAB_ROOT_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+LEGGED_MJLAB_ENVS_DIR = os.path.join(LEGGED_MJLAB_ROOT_DIR, 'legged_gym', 'envs')

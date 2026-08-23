@@ -33,8 +33,20 @@ import os
 from collections import deque
 import statistics
 
-from torch.utils.tensorboard import SummaryWriter
 import torch
+
+try:
+    from torch.utils.tensorboard import SummaryWriter
+except ImportError:  # tensorboard is optional when no logging directory is used
+    class SummaryWriter:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def add_scalar(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
 
 from rsl_rl.algorithms import PPO
 from rsl_rl.modules import ActorCritic, ActorCriticRecurrent

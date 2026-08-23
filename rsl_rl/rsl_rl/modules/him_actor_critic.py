@@ -28,12 +28,12 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
-import numpy as np
+import math
 
 import torch
 import torch.nn as nn
 from torch.distributions import Normal
-from .actor_critic import ActorCritic, get_activation
+from .actor_critic import get_activation
 from rsl_rl.modules.him_estimator import HIMEstimator
 
 class RunningMeanStd:
@@ -86,18 +86,34 @@ class HIMActorCritic(nn.Module):
             print("ActorCritic.__init__ got unexpected arguments, which will be ignored: " + str([key for key in kwargs.keys()]))
         super(HIMActorCritic, self).__init__()
 
+        if num_one_step_obs <= 0:
+            raise ValueError("num_one_step_obs must be positive")
+        if num_actor_obs <= 0 or num_actor_obs % num_one_step_obs != 0:
+            raise ValueError(
+                "num_actor_obs must be a positive multiple of num_one_step_obs"
+            )
+        if num_actions <= 0:
+            raise ValueError("num_actions must be positive")
+        if not math.isfinite(float(init_noise_std)) or init_noise_std <= 0:
+            raise ValueError("init_noise_std must be finite and positive")
+
         activation = get_activation(activation)
 
-        self.history_size = int(num_actor_obs/num_one_step_obs)
+        self.history_size = int(num_actor_obs / num_one_step_obs)
         self.num_actor_obs = num_actor_obs
+        self.num_critic_obs = num_critic_obs
         self.num_actions = num_actions
         self.num_one_step_obs = num_one_step_obs
 
-        mlp_input_dim_a = num_one_step_obs + 3 + 16
+        # HIMActorCritic consumes one current observation, estimated base
+        # velocity, and the estimator latent.  Derive the latent width from
+        # the estimator instead of duplicating its default width here.
+        self.estimator = HIMEstimator(
+            temporal_steps=self.history_size,
+            num_one_step_obs=num_one_step_obs,
+        )
+        mlp_input_dim_a = num_one_step_obs + 3 + self.estimator.num_latent
         mlp_input_dim_c = num_critic_obs
-
-        # Estimator
-        self.estimator = HIMEstimator(temporal_steps=self.history_size, num_one_step_obs=num_one_step_obs)
 
         # Policy
         actor_layers = []
@@ -128,8 +144,13 @@ class HIMActorCritic(nn.Module):
         print(f"Critic MLP: {self.critic}")
         print(f'Estimator: {self.estimator.encoder}')
 
-        # Action noise
-        self.std = nn.Parameter(init_noise_std * torch.ones(num_actions))
+        # Action noise is represented in log space.  A direct, unconstrained
+        # standard-deviation parameter can become negative during PPO and
+        # make Normal.log_prob produce NaNs.  Clamping the finite log value
+        # also protects inference from a corrupted optimizer/checkpoint.
+        self.log_std = nn.Parameter(
+            torch.full((num_actions,), math.log(float(init_noise_std)))
+        )
         self.distribution = None
         # disable args validation for speedup
         Normal.set_default_validate_args = False
@@ -152,11 +173,24 @@ class HIMActorCritic(nn.Module):
         raise NotImplementedError
     
     @property
+    def std(self):
+        """Current finite, strictly positive action standard deviation."""
+        log_std = torch.nan_to_num(
+            self.log_std,
+            nan=0.0,
+            posinf=5.0,
+            neginf=-20.0,
+        ).clamp(min=-20.0, max=5.0)
+        return torch.exp(log_std)
+
+    @property
     def action_mean(self):
         return self.distribution.mean
 
     @property
     def action_std(self):
+        if self.distribution is None:
+            return self.std
         return self.distribution.stddev
     
     @property
@@ -168,7 +202,7 @@ class HIMActorCritic(nn.Module):
             vel, latent = self.estimator(obs_history)
         actor_input = torch.cat((obs_history[:,:self.num_one_step_obs], vel, latent), dim=-1)
         mean = self.actor(actor_input)
-        self.distribution = Normal(mean, mean*0. + self.std)
+        self.distribution = Normal(mean, mean * 0. + self.std)
 
     def act(self, obs_history=None, **kwargs):
         self.update_distribution(obs_history)

@@ -1,459 +1,492 @@
+"""mjlab 1.6.0 environment adapter for the HIM Go2 task.
+
+The native environment deliberately exposes one actor frame.  The HIM wrapper
+is responsible for stacking six frames, while the critic receives the actor
+frame plus base linear velocity (45 + 3).
+"""
+
 import math
 
 import torch
 
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as mjlab_mdp
-from mjlab.managers.action_manager import JointPositionActionCfg
-from mjlab.managers.event_manager import EventTermCfg
-from mjlab.managers.observation_manager import (
+from mjlab.envs.mdp.actions import JointPositionActionCfg
+from mjlab.managers import (
+    CurriculumTermCfg,
+    EventTermCfg,
     ObservationGroupCfg,
     ObservationTermCfg,
+    RewardTermCfg,
+    SceneEntityCfg,
+    TerminationTermCfg,
 )
-from mjlab.managers.reward_manager import RewardTermCfg
-from mjlab.managers.scene_entity_config import SceneEntityCfg
-from mjlab.managers.termination_manager import TerminationTermCfg
 from mjlab.scene import SceneCfg
-from mjlab.sensor import ContactSensorCfg
+from mjlab.sim import MujocoCfg, SimulationCfg
+from mjlab.tasks.velocity import mdp as velocity_mdp
+from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from mjlab.terrains import TerrainEntityCfg
 from mjlab.terrains.config import ROUGH_TERRAINS_CFG
-from mjlab.tasks.velocity import UniformVelocityCommandCfg
 from mjlab.utils.noise import UniformNoiseCfg
 
 from legged_mjlab.envs.him_go2.go2_asset import Go2Asset
-from legged_mjlab.envs.him_go2.him_go2_config import HimGo2RoughCfg, HimGo2RoughCfgPPO
+from legged_mjlab.envs.him_go2.him_go2_config import HimGo2RoughCfg
 
 
 class HimGo2Env(ManagerBasedRlEnv):
+    """Construct a Go2 manager-based environment with the project config."""
+
     def __init__(self, cfg=None, device=None, render_mode=None, play=False):
         self.task_cfg = cfg if cfg is not None else HimGo2RoughCfg()
         self.play = bool(play)
-        manager_cfg = self._build_mjlab_cfg(self.task_cfg, self.play)
-        selected_device = device or self.task_cfg.env.device
+        manager_cfg = self._build_mjlab_cfg(self.task_cfg, play=self.play)
+        selected_device = device if device is not None else self.task_cfg.env.device
         super().__init__(
             cfg=manager_cfg,
             device=selected_device,
             render_mode=render_mode,
         )
 
+    @staticmethod
+    def _entity_cfg(cfg):
+        return SceneEntityCfg(
+            name=cfg.asset.name,
+            joint_names=Go2Asset.Names.joint_order,
+            preserve_order=True,
+        )
+
+    @staticmethod
+    def _noise_range(value, level):
+        magnitude = abs(float(value)) * abs(float(level))
+        if magnitude == 0.0:
+            return None
+        return UniformNoiseCfg(n_min=-magnitude, n_max=magnitude)
+
     @classmethod
     def _build_mjlab_cfg(cls, cfg, play=False):
         asset = Go2Asset(cfg, entity_name=cfg.asset.name)
-        if cfg.terrain.mesh_type != "plane":
-            asset.add_terrain_scan_sensor(debug_vis=not play)
-            asset.add_foot_contact_sensor()
-        asset.validate()
 
+        # Contact sensors are required by the termination/reward contract on
+        # every terrain, including the default plane.  Only the optional terrain
+        # ray scan is conditional on rough terrain.
+        terrain_type = "plane" if cfg.terrain.mesh_type == "plane" else "generator"
+        asset.add_foot_contact_sensor()
+        asset.add_illegal_contact_sensor()
+        if terrain_type != "plane":
+            asset.add_terrain_scan_sensor(debug_vis=not play)
+        asset.validate(require_effort_limits=True)
+
+        entity_cfg = cls._entity_cfg(cfg)
         actor_terms = {
-            "imu_ang_vel": ObservationTermCfg(
-                func=cls._obs_imu_ang_vel,
-                params={"sensor_name": "robot/imu_ang_vel"},
-                noise=UniformNoiseCfg(
-                    n_min=-cfg.noise.imu_ang_vel,
-                    n_max=cfg.noise.imu_ang_vel,
+            # Keep this insertion order in sync with the deploy policy.
+            "commands": ObservationTermCfg(
+                func=mjlab_mdp.generated_commands,
+                params={"command_name": "twist"},
+                scale=tuple(cfg.commands.scale),
+                noise=cls._noise_range(
+                    getattr(cfg.noise, "command", 0.0),
+                    getattr(cfg.noise, "noise_level", 1.0),
+                ),
+            ),
+            "angular_velocity": ObservationTermCfg(
+                func=mjlab_mdp.builtin_sensor,
+                params={"sensor_name": f"{cfg.asset.name}/imu_ang_vel"},
+                scale=0.25,
+                noise=cls._noise_range(
+                    cfg.noise.imu_ang_vel,
+                    getattr(cfg.noise, "noise_level", 1.0),
                 ),
             ),
             "projected_gravity": ObservationTermCfg(
-                func=cls._obs_projected_gravity,
-                noise=UniformNoiseCfg(
-                    n_min=-cfg.noise.projected_gravity,
-                    n_max=cfg.noise.projected_gravity,
+                func=mjlab_mdp.projected_gravity,
+                params={"asset_cfg": SceneEntityCfg(name=cfg.asset.name)},
+                noise=cls._noise_range(
+                    cfg.noise.projected_gravity,
+                    getattr(cfg.noise, "noise_level", 1.0),
                 ),
             ),
             "joint_pos": ObservationTermCfg(
-                func=cls._obs_joint_pos_rel,
-                params={"asset_cfg": SceneEntityCfg(
-                    name=cfg.asset.name,
-                    joint_names=(".*",),
-                )},
-                noise=UniformNoiseCfg(
-                    n_min=-cfg.noise.joint_pos,
-                    n_max=cfg.noise.joint_pos,
+                func=mjlab_mdp.joint_pos_rel,
+                params={"asset_cfg": entity_cfg},
+                scale=1.0,
+                noise=cls._noise_range(
+                    cfg.noise.joint_pos,
+                    getattr(cfg.noise, "noise_level", 1.0),
                 ),
             ),
             "joint_vel": ObservationTermCfg(
-                func=cls._obs_joint_vel,
-                params={"asset_cfg": SceneEntityCfg(
-                    name=cfg.asset.name,
-                    joint_names=(".*",),
-                )},
-                noise=UniformNoiseCfg(
-                    n_min=-cfg.noise.joint_vel,
-                    n_max=cfg.noise.joint_vel,
+                func=mjlab_mdp.joint_vel_rel,
+                params={"asset_cfg": entity_cfg},
+                scale=0.05,
+                noise=cls._noise_range(
+                    cfg.noise.joint_vel,
+                    getattr(cfg.noise, "noise_level", 1.0),
                 ),
             ),
-            "commands": ObservationTermCfg(func=cls._obs_commands),
-            "last_action": ObservationTermCfg(func=cls._obs_last_action),
+            "last_action": ObservationTermCfg(
+                func=mjlab_mdp.last_action,
+                params={"action_name": None},
+            ),
         }
         critic_terms = dict(actor_terms)
         critic_terms["base_lin_vel"] = ObservationTermCfg(
-            func=cls._obs_base_lin_vel
+            func=mjlab_mdp.base_lin_vel,
+            params={"asset_cfg": SceneEntityCfg(name=cfg.asset.name)},
         )
-        if cfg.terrain.mesh_type != "plane":
-            actor_terms["height_scan"] = ObservationTermCfg(
-                func=cls._obs_height_scan,
-                params={"sensor_name": "terrain_scan"},
-                scale=0.2,
-            )
-            critic_terms["height_scan"] = actor_terms["height_scan"]
 
         observations = {
             "actor": ObservationGroupCfg(
                 terms=actor_terms,
                 concatenate_terms=True,
-                enable_corruption=cfg.noise.add_noise and not play,
-                history_length=cfg.him.history_length,
+                enable_corruption=bool(
+                    getattr(cfg.noise, "add_noise", False) and not play
+                ),
+                # History belongs to HIMRslRlWrapper, not the native manager.
+                history_length=None,
+                nan_policy="error",
             ),
             "critic": ObservationGroupCfg(
                 terms=critic_terms,
                 concatenate_terms=True,
                 enable_corruption=False,
-                history_length=1,
+                history_length=None,
+                nan_policy="error",
             ),
         }
 
         terrain = TerrainEntityCfg(
-            terrain_type=cfg.terrain.mesh_type,
-            terrain_generator=ROUGH_TERRAINS_CFG
-            if cfg.terrain.mesh_type != "plane"
-            else None,
-            max_init_terrain_level=cfg.terrain.max_init_terrain_level,
+            terrain_type=terrain_type,
+            terrain_generator=ROUGH_TERRAINS_CFG if terrain_type != "plane" else None,
+            max_init_terrain_level=(
+                cfg.terrain.max_init_terrain_level if terrain_type != "plane" else None
+            ),
+            debug_vis=bool(getattr(cfg.terrain, "debug_vis", False) and not play),
         )
         scene = SceneCfg(
-            num_envs=cfg.env.num_envs,
-            env_spacing=cfg.scene.env_spacing,
+            num_envs=int(cfg.env.num_envs),
+            env_spacing=float(cfg.env.env_spacing),
             entities={cfg.asset.name: asset.build_entity_cfg()},
             sensors=asset.build_scene_sensors(),
             terrain=terrain,
-            replicate_physics=cfg.scene.replicate_physics,
         )
 
         return ManagerBasedRlEnvCfg(
-            decimation=cfg.control.decimation,
-            episode_length_s=cfg.env.episode_length_s,
+            decimation=int(cfg.control.decimation),
+            episode_length_s=float(cfg.env.episode_length_s),
             scene=scene,
             observations=observations,
             actions={
                 "joint_position": JointPositionActionCfg(
                     entity_name=cfg.asset.name,
-                    actuator_names=(".*",),
-                    scale=cfg.control.action_scale,
-                    clip=cfg.control.action_clip,
+                    actuator_names=(r".*",),
+                    scale=float(cfg.control.action_scale),
+                    clip=dict(cfg.control.action_clip),
                     use_default_offset=True,
+                    preserve_order=True,
                 )
             },
-            commands=cls._build_commands(cfg),
+            commands=cls._build_commands(cfg, play=play),
             rewards=cls._build_rewards(cfg),
             terminations=cls._build_terminations(cfg),
             events=cls._build_events(cfg),
             curriculum=cls._build_curriculum(cfg),
+            seed=int(cfg.env.seed),
+            sim=SimulationCfg(
+                mujoco=MujocoCfg(
+                    timestep=float(cfg.sim.dt),
+                    gravity=tuple(cfg.sim.gravity),
+                )
+            ),
+            scale_rewards_by_dt=False,
         )
 
     @classmethod
-    def _build_commands(cls, cfg):
+    def _build_commands(cls, cfg, play=False):
+        heading = tuple(cfg.commands.heading) if cfg.commands.heading_command else None
         return {
             "twist": UniformVelocityCommandCfg(
+                resampling_time_range=tuple(cfg.commands.resampling_time_range),
                 entity_name=cfg.asset.name,
-                resampling_time=cfg.commands.resampling_time,
-                heading_command=cfg.commands.heading_command,
+                heading_command=bool(cfg.commands.heading_command),
+                heading_control_stiffness=float(cfg.commands.heading_control_stiffness),
+                rel_standing_envs=float(cfg.commands.rel_standing_envs),
+                rel_heading_envs=float(cfg.commands.rel_heading_envs),
+                rel_world_envs=float(getattr(cfg.commands, "rel_world_envs", 0.0)),
+                rel_forward_envs=float(getattr(cfg.commands, "rel_forward_envs", 0.0)),
+                init_velocity_prob=float(getattr(cfg.commands, "init_velocity_prob", 0.0)),
+                debug_vis=bool(getattr(cfg.commands, "debug_vis", False) and not play),
                 ranges=UniformVelocityCommandCfg.Ranges(
-                    lin_vel_x=cfg.commands.lin_vel_x,
-                    lin_vel_y=cfg.commands.lin_vel_y,
-                    ang_vel_z=cfg.commands.ang_vel_yaw,
-                    heading=cfg.commands.heading,
+                    lin_vel_x=tuple(cfg.commands.lin_vel_x),
+                    lin_vel_y=tuple(cfg.commands.lin_vel_y),
+                    ang_vel_z=tuple(cfg.commands.ang_vel_yaw),
+                    heading=heading,
                 ),
             )
         }
 
+    @staticmethod
+    def _weight(rewards, name):
+        return float(getattr(rewards, name, 0.0))
+
     @classmethod
     def _build_rewards(cls, cfg):
-        return {
-            "track_linear_velocity": RewardTermCfg(
-                func=cls._reward_track_linear_velocity,
-                weight=cfg.rewards.tracking_lin_vel,
-                params={"std": cfg.rewards.tracking_std},
-            ),
-            "track_angular_velocity": RewardTermCfg(
-                func=cls._reward_track_angular_velocity,
-                weight=cfg.rewards.tracking_ang_vel,
-                params={"std": cfg.rewards.tracking_std},
-            ),
-            "lin_vel_z": RewardTermCfg(
-                func=cls._reward_base_lin_vel_z,
-                weight=cfg.rewards.lin_vel_z,
-            ),
-            "orientation": RewardTermCfg(
-                func=cls._reward_orientation,
-                weight=cfg.rewards.orientation,
-            ),
-            "action_rate": RewardTermCfg(
-                func=cls._reward_action_rate,
-                weight=cfg.rewards.action_rate,
-            ),
-            "hip_reduction": RewardTermCfg(
+        rewards = cfg.rewards
+        robot_cfg = SceneEntityCfg(name=cfg.asset.name)
+        terms = {}
+
+        if cls._weight(rewards, "tracking_lin_vel") != 0.0:
+            terms["track_linear_velocity"] = RewardTermCfg(
+                func=velocity_mdp.track_linear_velocity,
+                weight=cls._weight(rewards, "tracking_lin_vel"),
+                params={
+                    "std": float(getattr(rewards, "tracking_std", 0.5)),
+                    "command_name": "twist",
+                    "asset_cfg": robot_cfg,
+                },
+            )
+        if cls._weight(rewards, "tracking_ang_vel") != 0.0:
+            terms["track_angular_velocity"] = RewardTermCfg(
+                func=velocity_mdp.track_angular_velocity,
+                weight=cls._weight(rewards, "tracking_ang_vel"),
+                params={
+                    "std": float(getattr(rewards, "tracking_std", 0.5)),
+                    "command_name": "twist",
+                    "asset_cfg": robot_cfg,
+                },
+            )
+        if cls._weight(rewards, "lin_vel_z") != 0.0:
+            terms["lin_vel_z"] = RewardTermCfg(
+                func=cls._reward_lin_vel_z,
+                weight=cls._weight(rewards, "lin_vel_z"),
+            )
+        if cls._weight(rewards, "orientation") != 0.0:
+            terms["orientation"] = RewardTermCfg(
+                func=mjlab_mdp.flat_orientation_l2,
+                weight=cls._weight(rewards, "orientation"),
+                params={"asset_cfg": robot_cfg},
+            )
+        if cls._weight(rewards, "action_rate") != 0.0:
+            terms["action_rate"] = RewardTermCfg(
+                func=mjlab_mdp.action_rate_l2,
+                weight=cls._weight(rewards, "action_rate"),
+            )
+        if cls._weight(rewards, "hip_reduction") != 0.0:
+            terms["hip_reduction"] = RewardTermCfg(
                 func=cls._reward_hip_reduction,
-                weight=cfg.rewards.hip_reduction,
-            ),
-            "termination": RewardTermCfg(
-                func=cls._reward_termination,
-                weight=cfg.rewards.termination,
-            ),
-        }
+                weight=cls._weight(rewards, "hip_reduction"),
+            )
+        if cls._weight(rewards, "termination") != 0.0:
+            terms["termination"] = RewardTermCfg(
+                func=mjlab_mdp.is_terminated,
+                weight=cls._weight(rewards, "termination"),
+            )
+        if cls._weight(rewards, "dof_pos_limits") != 0.0:
+            terms["dof_pos_limits"] = RewardTermCfg(
+                func=mjlab_mdp.joint_pos_limits,
+                weight=cls._weight(rewards, "dof_pos_limits"),
+                params={"asset_cfg": robot_cfg},
+            )
+
+        # This term is enabled only when the corresponding sensor exists.  The
+        # default plane mode intentionally has no contact sensor.
+        if cls._weight(rewards, "feet_air_time") != 0.0:
+            terms["feet_air_time"] = RewardTermCfg(
+                func=velocity_mdp.feet_air_time,
+                weight=cls._weight(rewards, "feet_air_time"),
+                params={"sensor_name": "feet_ground_contact", "command_name": "twist"},
+            )
+        return terms
 
     @classmethod
     def _build_terminations(cls, cfg):
-        return {
+        terms = {
             "time_out": TerminationTermCfg(
-                func=cls._termination_time_out,
-                time_out=cfg.terminations.time_out,
-            ),
-            "base_height": TerminationTermCfg(
-                func=cls._termination_base_height,
-                params={"minimum": cfg.terminations.base_height},
-                time_out=False,
-            ),
-            "roll_pitch": TerminationTermCfg(
-                func=cls._termination_roll_pitch,
-                params={"maximum": cfg.terminations.roll_pitch},
-                time_out=False,
-            ),
-            "illegal_contact": TerminationTermCfg(
-                func=cls._termination_illegal_contact,
-                params={"minimum_force": cfg.terminations.illegal_contact_force},
-                time_out=False,
+                func=mjlab_mdp.time_out,
+                time_out=bool(cfg.terminations.time_out),
             ),
         }
+        robot_cfg = SceneEntityCfg(name=cfg.asset.name)
+        if float(cfg.terminations.base_height) > 0.0:
+            terms["base_height"] = TerminationTermCfg(
+                func=mjlab_mdp.root_height_below_minimum,
+                params={
+                    "minimum_height": float(cfg.terminations.base_height),
+                    "asset_cfg": robot_cfg,
+                },
+                time_out=False,
+            )
+        if bool(cfg.terminations.bad_orientation):
+            terms["bad_orientation"] = TerminationTermCfg(
+                func=mjlab_mdp.bad_orientation,
+                params={
+                    "limit_angle": math.radians(
+                        float(cfg.terminations.bad_orientation_limit_deg)
+                    ),
+                    "asset_cfg": robot_cfg,
+                },
+                time_out=False,
+            )
+        if bool(cfg.terminations.illegal_contact or cfg.terminations.base_contact):
+            terms["illegal_contact"] = TerminationTermCfg(
+                func=cls._termination_illegal_contact,
+                params={
+                    "force_threshold": float(cfg.terminations.illegal_contact_force)
+                },
+                time_out=False,
+            )
+        return terms
 
     @classmethod
     def _build_events(cls, cfg):
         events = {
-            "reset_robot": EventTermCfg(
-                func=cls._event_reset_robot,
+            "reset_scene": EventTermCfg(
+                func=mjlab_mdp.reset_scene_to_default,
                 mode="reset",
-            ),
-        }
-        if cfg.domain_rand.randomize_friction:
-            events["randomize_friction"] = EventTermCfg(
-                func=cls._event_randomize_friction,
-                mode="startup",
-                params={"range": cfg.domain_rand.friction_range},
             )
-        if cfg.domain_rand.push_robots:
+        }
+        if bool(cfg.domain_rand.push_robots):
+            max_velocity = abs(float(cfg.domain_rand.max_push_vel_xy))
             events["push_robot"] = EventTermCfg(
-                func=cls._event_push_robot,
+                func=mjlab_mdp.push_by_setting_velocity,
                 mode="interval",
                 interval_range_s=(
-                    cfg.domain_rand.push_interval_s,
-                    cfg.domain_rand.push_interval_s,
+                    float(cfg.domain_rand.push_interval_s),
+                    float(cfg.domain_rand.push_interval_s),
                 ),
-                params={"max_velocity": cfg.domain_rand.max_push_vel_xy},
+                params={
+                    "velocity_range": {
+                        "x": (-max_velocity, max_velocity),
+                        "y": (-max_velocity, max_velocity),
+                    },
+                    "asset_cfg": SceneEntityCfg(name=cfg.asset.name),
+                },
             )
         return events
 
     @classmethod
     def _build_curriculum(cls, cfg):
-        if not cfg.terrain.curriculum:
+        if not bool(cfg.terrain.curriculum) or cfg.terrain.mesh_type == "plane":
             return {}
         return {
-            "terrain_level": cls._curriculum_terrain_level,
+            "terrain_levels": CurriculumTermCfg(
+                func=velocity_mdp.terrain_levels_vel,
+                params={
+                    "command_name": "twist",
+                    "asset_cfg": SceneEntityCfg(name=cfg.asset.name),
+                },
+            )
         }
 
     @staticmethod
-    def _require_tensor(value, name):
+    def _finite(value, name):
         if not isinstance(value, torch.Tensor):
-            raise TypeError(name + " must be a torch.Tensor")
-        if not torch.isfinite(value).all():
-            raise ValueError(name + " contains NaN or Inf")
-        return value
+            raise TypeError(f"{name} must be a torch.Tensor")
+        finite = torch.isfinite(value)
+        if bool(finite.all()):
+            return value
 
-    @staticmethod
-    def _sensor(env, sensor_name):
-        sensors = getattr(env.scene, "sensors", {})
-        if sensor_name not in sensors:
-            raise KeyError("sensor is not registered: " + sensor_name)
-        sensor = sensors[sensor_name]
-        data = getattr(sensor, "data", sensor)
-        value = getattr(data, "value", data)
-        return Go2Env._require_tensor(value, sensor_name)
+        if value.ndim == 0:
+            env_ids = [0]
+        else:
+            invalid_envs = ~finite.reshape(value.shape[0], -1).all(dim=1)
+            env_ids = torch.where(invalid_envs)[0].detach().cpu().tolist()
+        raise FloatingPointError(
+            f"NaN/Inf detected in observation '{name}' "
+            f"for environments: {env_ids[:10]}"
+        )
 
     @staticmethod
     def _robot(env, entity_name="robot"):
-        try:
-            return env.scene[entity_name]
-        except (KeyError, TypeError) as exc:
-            raise KeyError("robot entity is not registered: " + entity_name) from exc
+        return env.scene[entity_name]
 
     @staticmethod
     def _obs_imu_ang_vel(env, sensor_name):
-        value = Go2Env._sensor(env, sensor_name)
-        if value.ndim != 2 or value.shape[-1] != 3:
-            raise ValueError("imu angular velocity must have shape [N, 3]")
-        return value
+        value = HimGo2Env._finite(mjlab_mdp.builtin_sensor(env, sensor_name), sensor_name)
+        return value.reshape(value.shape[0], -1)
 
     @staticmethod
-    def _obs_projected_gravity(env):
-        robot = Go2Env._robot(env)
-        value = robot.data.projected_gravity_b
-        if value.shape[-1] != 3:
-            raise ValueError("projected gravity must have shape [N, 3]")
-        return Go2Env._require_tensor(value, "projected_gravity_b")
+    def _obs_projected_gravity(env, asset_cfg=None):
+        value = mjlab_mdp.projected_gravity(
+            env, asset_cfg or SceneEntityCfg(name=Go2Asset.Names.entity)
+        )
+        return HimGo2Env._finite(value, "projected_gravity")
 
     @staticmethod
     def _obs_joint_pos_rel(env, asset_cfg):
-        robot = Go2Env._robot(env, asset_cfg.name)
-        joint_ids = robot.find_joints(asset_cfg.joint_names)[0]
-        value = robot.data.joint_pos[:, joint_ids]
-        return Go2Env._require_tensor(value, "joint_pos_rel")
+        return HimGo2Env._finite(mjlab_mdp.joint_pos_rel(env, asset_cfg=asset_cfg), "joint_pos_rel")
 
     @staticmethod
     def _obs_joint_vel(env, asset_cfg):
-        robot = Go2Env._robot(env, asset_cfg.name)
-        joint_ids = robot.find_joints(asset_cfg.joint_names)[0]
-        value = robot.data.joint_vel[:, joint_ids]
-        return Go2Env._require_tensor(value, "joint_vel")
+        return HimGo2Env._finite(mjlab_mdp.joint_vel_rel(env, asset_cfg=asset_cfg), "joint_vel_rel")
 
     @staticmethod
     def _obs_commands(env):
-        value = env.command_manager.get_command("twist")
-        return Go2Env._require_tensor(value, "commands")
+        return HimGo2Env._finite(mjlab_mdp.generated_commands(env, command_name="twist"), "commands")
 
     @staticmethod
     def _obs_last_action(env):
-        value = env.action_manager.action
-        return Go2Env._require_tensor(value, "last_action")
+        return HimGo2Env._finite(mjlab_mdp.last_action(env), "last_action")
 
     @staticmethod
-    def _obs_base_lin_vel(env):
-        value = Go2Env._robot(env).data.root_lin_vel_b
-        return Go2Env._require_tensor(value, "root_lin_vel_b")
+    def _obs_base_lin_vel(env, asset_cfg=None):
+        value = mjlab_mdp.base_lin_vel(
+            env, asset_cfg or SceneEntityCfg(name=Go2Asset.Names.entity)
+        )
+        return HimGo2Env._finite(value, "base_lin_vel")
 
     @staticmethod
     def _obs_height_scan(env, sensor_name):
-        value = Go2Env._sensor(env, sensor_name)
-        if value.ndim == 3:
-            value = value.reshape(value.shape[0], -1)
-        if value.ndim != 2:
-            raise ValueError("height scan must have shape [N, D]")
-        return value
+        # Kept as a compatibility helper for callers that explicitly request a
+        # rough-terrain scan.  It is never part of the default 45-dim actor.
+        sensor = env.scene[sensor_name]
+        value = getattr(sensor.data, "distance", None)
+        if value is None:
+            value = getattr(sensor.data, "value", None)
+        if value is None:
+            raise AttributeError(f"height sensor {sensor_name!r} has no distance field")
+        return HimGo2Env._finite(value.reshape(value.shape[0], -1), "height_scan")
 
     @staticmethod
-    def _reward_track_linear_velocity(env, std):
-        command = env.command_manager.get_command("twist")[:, :2]
-        measured = Go2Env._robot(env).data.root_lin_vel_b[:, :2]
-        error = torch.sum(torch.square(command - measured), dim=-1)
-        return torch.exp(-error / (2.0 * std * std))
-
-    @staticmethod
-    def _reward_track_angular_velocity(env, std):
-        command = env.command_manager.get_command("twist")[:, 2]
-        measured = Go2Env._robot(env).data.root_ang_vel_b[:, 2]
-        error = torch.square(command - measured)
-        return torch.exp(-error / (2.0 * std * std))
-
-    @staticmethod
-    def _reward_base_lin_vel_z(env):
-        value = Go2Env._robot(env).data.root_lin_vel_b[:, 2]
-        return torch.square(value)
-
-    @staticmethod
-    def _reward_orientation(env):
-        gravity = Go2Env._robot(env).data.projected_gravity_b
-        return torch.sum(torch.square(gravity[:, :2]), dim=-1)
-
-    @staticmethod
-    def _reward_action_rate(env):
-        action = env.action_manager.action
-        previous = env.action_manager.prev_action
-        return torch.sum(torch.square(action - previous), dim=-1)
+    def _reward_lin_vel_z(env):
+        value = HimGo2Env._robot(env).data.root_link_lin_vel_b[:, 2]
+        return torch.nan_to_num(torch.square(value), nan=0.0, posinf=0.0, neginf=0.0)
 
     @staticmethod
     def _reward_hip_reduction(env):
-        robot = Go2Env._robot(env)
-        joint_ids = robot.find_joints((".*_hip_joint",))[0]
-        hip_yaw = robot.data.joint_pos[:, joint_ids]
-        return torch.sum(torch.square(hip_yaw), dim=-1)
+        robot = HimGo2Env._robot(env)
+        joint_ids, _ = robot.find_joints((r".*_hip_joint",), preserve_order=True)
+        value = robot.data.joint_pos[:, joint_ids]
+        return torch.nan_to_num(torch.sum(torch.square(value), dim=-1))
 
     @staticmethod
-    def _reward_termination(env):
-        return env.termination_manager.terminated.float()
+    def _termination_illegal_contact(env, force_threshold):
+        sensor = env.scene.sensors.get("illegal_contact")
+        if sensor is None:
+            raise RuntimeError(
+                "required contact sensor 'illegal_contact' is not registered; "
+                "refusing to disable illegal-contact termination"
+            )
+        data = sensor.data
+        force = getattr(data, "force", None)
+        found = getattr(data, "found", None)
+        if force is None and found is None:
+            raise RuntimeError(
+                "required contact sensor 'illegal_contact' exposes neither "
+                "'force' nor 'found' data"
+            )
+        if force is not None:
+            force = HimGo2Env._finite(force, "illegal_contact.force")
+        if found is not None:
+            found = HimGo2Env._finite(found, "illegal_contact.found")
+        if force is not None:
+            result = torch.any(
+                torch.linalg.vector_norm(force, dim=-1) > float(force_threshold), dim=-1
+            )
+        else:
+            result = torch.any(found, dim=-1)
+        return result.to(dtype=torch.bool)
 
-    @staticmethod
-    def _termination_time_out(env):
-        return env.episode_length_buf >= env.max_episode_length
 
-    @staticmethod
-    def _termination_base_height(env, minimum):
-        height = Go2Env._robot(env).data.root_pos_w[:, 2]
-        return height < minimum
-
-    @staticmethod
-    def _termination_roll_pitch(env, maximum):
-        gravity = Go2Env._robot(env).data.projected_gravity_b[:, :2]
-        return torch.linalg.vector_norm(gravity, dim=-1) > maximum
-
-    @staticmethod
-    def _termination_illegal_contact(env, minimum_force):
-        sensor = Go2Env._sensor(env, "feet_ground_contact")
-        force = torch.linalg.vector_norm(sensor, dim=-1)
-        return torch.any(force > minimum_force, dim=-1)
-
-    @staticmethod
-    def _event_reset_robot(env, env_ids):
-        robot = Go2Env._robot(env)
-        count = len(env_ids)
-        position = torch.as_tensor(
-            env.task_cfg.init_state.pos,
-            device=robot.data.root_pos_w.device,
-        ).expand(count, 3)
-        velocity = torch.zeros((count, 6), device=position.device)
-        robot.write_root_pose_to_sim(
-            torch.cat((position, torch.as_tensor(
-                env.task_cfg.init_state.rot,
-                device=position.device,
-            ).expand(count, 4)), dim=-1),
-            env_ids,
-        )
-        robot.write_root_velocity_to_sim(velocity, env_ids)
-        joint_ids = robot.find_joints((".*",))[0]
-        joint_position = torch.zeros(
-            (count, len(joint_ids)),
-            device=position.device,
-        )
-        for index, name in enumerate(robot.joint_names):
-            if name in env.task_cfg.init_state.default_joint_angles:
-                joint_position[:, index] = env.task_cfg.init_state.default_joint_angles[name]
-        robot.write_joint_state_to_sim(
-            joint_position,
-            torch.zeros_like(joint_position),
-            env_ids,
-            joint_ids,
-        )
-
-    @staticmethod
-    def _event_randomize_friction(env, range):
-        lower, upper = range
-        friction = torch.empty(
-            (env.num_envs, 1),
-            device=env.device,
-        ).uniform_(lower, upper)
-        env.scene["robot"].write_material_properties_to_sim(
-            friction=friction
-        )
-
-    @staticmethod
-    def _event_push_robot(env, max_velocity):
-        robot = Go2Env._robot(env)
-        velocity = torch.empty(
-            (env.num_envs, 2),
-            device=env.device,
-        ).uniform_(-max_velocity, max_velocity)
-        root_velocity = robot.data.root_vel_w.clone()
-        root_velocity[:, :2] = root_velocity[:, :2] + velocity
-        robot.write_root_velocity_to_sim(root_velocity)
-
-    @staticmethod
-    def _curriculum_terrain_level(env):
-        command = env.command_manager.get_command("twist")
-        progress = torch.linalg.vector_norm(command[:, :2], dim=-1)
-        env.scene.terrain.update_env_origins(progress)
-
+# A few old task entry points imported Go2Env.  Keep the alias local to this file
+# instead of maintaining a second environment implementation.
+Go2Env = HimGo2Env
