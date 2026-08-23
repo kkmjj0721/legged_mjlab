@@ -10,7 +10,7 @@ from typing import Any, Dict, Tuple
 import mujoco
 
 from legged_mjlab.utils.paths import PROJECT_ROOT, resource_path
-from mjlab.actuator import BuiltinPositionActuatorCfg, IdealPdActuatorCfg
+from mjlab.actuator import  IdealPdActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 from mjlab.utils.os import update_assets
 from mjlab.sensor import (
@@ -56,6 +56,12 @@ class Go2Asset:
             self.action_delay_min = self.action_delay[0]
             self.action_delay_max = self.action_delay[1]
             self.action_hold_prob = self.cfg.domain_rand.action_hold_prob
+
+        else:
+            self.action_delay = 0
+            self.action_delay_min = 0
+            self.action_delay_max = 0
+            self.action_hold_prob = 0
 
     class EntityCfg():
         def __init__(self, asset: "Go2Asset"):
@@ -154,5 +160,57 @@ class Go2Asset:
               )
 
     class sensor:
-        pass
+        def __init__(self, asset: "Go2Asset"):
+            self.asset = asset
 
+        def get_foot_contact_sensor(self) -> ContactSensorCfg:
+            """ 足端触地力与接触判定传感器。"""
+            return ContactSensorCfg(
+                prim_path=".*",
+                target_names_expr=("^(FL|FR|RL|RR)_foot_collision$",),
+                match=ContactMatch.GEOM_NAME,
+                history_length=1,
+                track_air_time=True,
+                force_threshold=1.0,
+            )
+
+        def get_illegal_contact_sensor(self) -> ContactSensorCfg:
+            """ 机身/大腿/小腿非期望碰撞检测传感器。
+            """
+            return ContactSensorCfg(
+                prim_path=".*",
+                target_names_expr=(r"^(base[123]_collision|(FL|FR|RL|RR)_(thigh_collision|calf[12]_collision))$",),
+                match=ContactMatch.GEOM_NAME,
+                history_length=1,
+                track_air_time=False,
+                force_threshold=getattr(
+                    getattr(self.asset.cfg, "terminations", None),
+                    "illegal_contact_force",
+                    1.0,
+                ),
+            )
+
+        def get_height_scan_sensor(self, debug_vis: bool = False) -> RayCastSensorCfg:
+            """基座底部高程图扫描传感器（17x11=187 网格点）。
+            """
+            return RayCastSensorCfg(
+                prim_path="base_link",
+                attach_to_frame=True,
+                pattern_cfg=GridPatternCfg(
+                    size=(1.6, 1.0),
+                    resolution=getattr(self.asset.cfg.terrain, "horizontal_scale", 0.1),
+                ),
+                ray_alignment="z_negative",
+                ray_length=2.0,
+                offset_pos=(0.0, 0.0, 0.5),
+                debug_vis=debug_vis,
+            )
+
+        def get_all_sensors(self, debug_vis: bool = False) -> Dict[str, Any]:
+            sensors = {
+                "feet_ground_contact": self.get_foot_contact_sensor(),
+                "illegal_contact": self.get_illegal_contact_sensor(),
+            }
+            if getattr(self.asset.cfg.terrain, "measure_heights", False):
+                sensors["height_scan"] = self.get_height_scan_sensor(debug_vis=debug_vis)
+            return sensors
