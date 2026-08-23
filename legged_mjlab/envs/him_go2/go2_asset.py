@@ -47,6 +47,9 @@ class Go2Asset:
         self.rot = self.cfg.init_state.rot
         self.default_joint_angles = self.cfg.init_state.default_joint_angles
 
+        self.vel_limit = 
+        self.pos_limit = 
+
         if self.cfg.domain_rand.randomize_cmd_action_latency:
 
             self.action_delay = self.cfg.domain_rand.range_cmd_action_latency
@@ -70,9 +73,7 @@ class Go2Asset:
         def get_spec(self) -> mujoco.MjSpec:
             """ 解析 MJCF 生成 MjSpec，并完成 assets 资源表绑定。
             """
-            spec = mujoco.MjSpec.from_file(str(self.asset.xml_path))
-            spec.assets = self.get_assets(spec.meshdir)
-            return spec
+            return mujoco.MjSpec.from_file(str(self.asset.xml_path))
 
         def _get_val(self, param: Any, key: str, default: float) -> float:
             if isinstance(param, Mapping):
@@ -86,40 +87,71 @@ class Go2Asset:
                 target_names_expr = (".*hip_.*",),
                 stiffness = self._get_val(self.asset.stiffness, "hip"),
                 damping = self._get_val(self.asset.damping, "hip"),
-                effort_limit = 
-                delay_min_lag =
-                delay_max_lag =
-                delay_hold_prob =          
-                delay_update_period =      
+                effort_limit = self._get_val(self.asset.effort_limit, "hip"),
+                delay_min_lag = self.asset.action_delay_min,
+                delay_max_lag = self.asset.action_delay_max,
+                delay_hold_prob = self.asset.action_hold_prob,      # 30% chance to keep current lag
+                delay_update_period = 10,       # Resample lag every 10 steps
             )
 
             ACTUATOR_THIGH = IdealPdActuatorCfg(
                 target_names_expr = (".*thigh_.*",),
-                stiffness =
-                damping = 
-                effort_limit = 
-                delay_min_lag =
-                delay_max_lag =
-                delay_hold_prob =          
-                delay_update_period =      
+                stiffness = self._get_val(self.asset.stiffness, "thigh"),
+                damping = self._get_val(self.asset.damping, "thigh"),
+                effort_limit = self._get_val(self.asset.effort_limit, "thigh"),
+                delay_min_lag = self.asset.action_delay_min,
+                delay_max_lag = self.asset.action_delay_max,
+                delay_hold_prob = self.asset.action_hold_prob,      # 30% chance to keep current lag
+                delay_update_period = 10,      
             )
 
             ACTUATOR_CALF = IdealPdActuatorCfg(
                 target_names_expr = (".*calf_.*",),
-                stiffness =
-                damping = 
-                effort_limit = 
-                delay_min_lag =
-                delay_max_lag =
-                delay_hold_prob =          
-                delay_update_period =      
+                stiffness = self._get_val(self.asset.stiffness, "calf"),
+                damping = self._get_val(self.asset.damping, "calf"),
+                effort_limit = self._get_val(self.asset.effort_limit, "calf"),
+                delay_min_lag = self.asset.action_delay_min,
+                delay_max_lag = self.asset.action_delay_max,
+                delay_hold_prob = self.asset.action_hold_prob,      # 30% chance to keep current lag
+                delay_update_period = 10,      
             )
 
-        def get_robot_cfg():
+            return (ACTUATOR_HIP, ACTUATOR_THIGH, ACTUATOR_CALF)
 
-        
+        def get_robot_cfg(self) -> EntityCfg:
+            """ 组装并返回 Go2 实体的完整 EntityCfg
+            """
+            foot_regex = "^(FL|FR|RL|RR)_foot_collision$"
+            static_friction = getattr(self.asset.cfg.terrain, "static_friction", 0.6)
 
+            INIT_STATE = EntityCfg.InitialStateCfg(
+                pos = self.asset.pos,
+                rot = self.asset.rot,
+                joint_pos=self.asset.default_joint_angles,
+                joint_vel={".*": 0.0},
+            )
 
+            FULL_COLLISION = CollisionCfg(
+                geom_names_expr=(".*_collision",),
+                condim={foot_regex: 3, ".*_collision": 1},
+                priority={foot_regex: 1},
+                friction={foot_regex: (static_friction,)},
+                solimp={foot_regex: (0.9, 0.95, 0.023)},
+                contype=1,
+                conaffinity=0,
+            )
+
+            ARTICULATION = EntityArticulationInfoCfg(
+                actuators=self.add_actuator_cfg(),
+                soft_joint_pos_limit_factor = self.pos_limit
+            )
+
+            return EntityCfg(
+                init_state=INIT_STATE,
+                collisions=(FULL_COLLISION,),
+                spec_fn=self.get_spec,
+                articulation=ARTICULATION,
+              )
 
     class sensor:
         pass
