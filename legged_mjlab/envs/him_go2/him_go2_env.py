@@ -22,5 +22,8 @@ class HimGo2Env(ManagerBasedRlEnv):
         )
 
 
-    def _build_mjlab_managercfg(self, cfg):
-        pass
+    def _build_mjlab_managercfg(self, cfg) -> ManagerBasedRlEnvCfg:
+        """ 将 HimGo2RoughCfg 转换为 ManagerBasedRlEnvCfg 以便于使用 mjlab 的管理器进行环境管理。
+        """
+        asset = Go2Asset(cfg)
+        
