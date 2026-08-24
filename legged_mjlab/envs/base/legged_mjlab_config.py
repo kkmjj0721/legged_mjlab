@@ -14,6 +14,7 @@ class LeggedMjlabCfg(BaseConfig):
         env_spacing = 3.0  # [m] spacing between sub-environments
         send_timeouts = True  # send time out information to algorithm
         episode_length_s = 20.0  # [s] duration of one episode
+        seed = 42
 
     class terrain:
         mesh_type = "plane"  # "plane" | "heightfield" | "trimesh" | "generator"

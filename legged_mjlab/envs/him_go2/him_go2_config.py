@@ -15,6 +15,7 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
             env_spacing = 3.0  # [m] spacing between sub-environments
             send_timeouts = True  # send time out information to algorithm
             episode_length_s = 20.0  # [s] duration of one episode
+            seed = 42
 
     class terrain( LeggedMjlabCfg.terrain ):
             mesh_type = "generator"  # "plane" | "heightfield" | "trimesh" | "generator"
