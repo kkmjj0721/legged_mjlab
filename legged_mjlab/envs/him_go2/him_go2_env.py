@@ -3,7 +3,7 @@ import torch
 
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.scene import SceneCfg 
-
+from mjlab.sim import MujocoCfg, SimulationCfg
 
 from mjlab.sensor import (
     ContactMatch,          # 接触匹配规则（用于定义 geom/body 碰撞过滤）
@@ -51,15 +51,20 @@ class HimGo2Env(ManagerBasedRlEnv):
 
 
         return ManagerBasedRlEnvCfg(
-            decimation = cfg.control.decimation ,               # 控制步
-            scene = self._build_scene(),
-            observations = ,
-            actions = ,
+            decimation = cfg.control.decimation ,                           # 控制步
+            scene = self._build_scene(cfg, asset),                          # 构建场景（包含实体、传感器、地形）
+            observations = self._build_observations(),                      # 挂载观测管理器配置
+            actions = self._build_actions(),                                # 挂载动作管理器配置
             events = ,
-            seed = cfg.env.seed,                                # 随机种子
-            sim = ,                                             # 
+            seed = cfg.env.seed,                                            # 随机种子
+            sim = SimulationCfg(                                            # 仿真引擎底层设置
+                mujoco = MujocoCfg(
+                    timestep = cfg.sim.dt,          # 物理仿真步长
+                    integrator = cfg.sim.gravity,   # 重力向量
+                )
+            ),                                             
             viewer = ,
-            episode_length_s = cfg.env.episode_length_s,        # 单回合最长时间
+            episode_length_s = cfg.env.episode_length_s,                    # 单回合最长时间
             rewards = ,
             terminations = ,
             commands = ,
@@ -143,7 +148,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             )
 
         # terrain
-        
+
 
 
 
