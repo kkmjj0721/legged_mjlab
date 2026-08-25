@@ -14,6 +14,7 @@ from mjlab.sensor import (
 )
 
 from mjlab.terrains import TerrainEntityCfg
+from mjlab.terrains.terrain_generator import TerrainGeneratorCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 
 
@@ -71,7 +72,6 @@ class HimGo2Env(ManagerBasedRlEnv):
             metrics = , 
             recorders = ,
             is_finite_horizon = ,
-            auto_reset = ,
             scale_rewards_by_dt = False,
         )
 
@@ -166,6 +166,17 @@ class HimGo2Env(ManagerBasedRlEnv):
             )
 
         # terrain
+        if cfg.terrain.mesh_type == "generator":
+            return TerrainEntityCfg(
+                terrain_type = "generator",
+                terrain_generator = TerrainGeneratorCfg(
+                    curriculum = True,
+                    size = (cfg.terrain.terrain_length, cfg.terrain.terrain_width),                 # 子地形大小
+                    num_rows = cfg.terrain.num_rows,                                                # 地形行数（难度等级）
+                    num_cols = cfg.terrain.num_cols,                                                # 地形列数（地形类型）
+
+                ),
+            )
 
 
     def _joint_names(cfg):
@@ -203,6 +214,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             )
         }
 
+
     def _build_events(self, cfg, play):
         """ 
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/events.html
@@ -223,10 +235,6 @@ class HimGo2Env(ManagerBasedRlEnv):
         """
 
     def _build_terminations(self):
-        """
-        """
-
-    def _build_events(self):
         """
         """
 
