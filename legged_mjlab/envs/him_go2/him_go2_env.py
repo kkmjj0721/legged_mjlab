@@ -164,7 +164,7 @@ class HimGo2Env(ManagerBasedRlEnv):
         return sensors
 
     def _build_terrain(self, cfg):
-        """
+        """ 构建训练/测试地形（平面地形或基于课程进阶的程序化生成地形）
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/terrain.html
         """
         # plane
@@ -229,7 +229,7 @@ class HimGo2Env(ManagerBasedRlEnv):
         }
 
     def _build_events(self, cfg, play):
-        """ 
+        """ 构建重置事件与域随机化
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/events.html
         """
 
@@ -242,10 +242,10 @@ class HimGo2Env(ManagerBasedRlEnv):
         """
         return cfg.rewards.scales.get(name, 0.0)
 
-    def _add_reward(cls, terms, cfg, name, func, params=None):
-        """ 添加注册奖励函数
+    def _add_reward(self, terms, cfg, name, func, params=None):
+        """ 通用奖励项注册辅助函数：仅当权重非零时才加入计算图
         """
-        weight = cls._reward_scale(cfg, name)
+        weight = self._reward_scale(cfg, name)
 
         if weight == 0.0:
             return
@@ -271,19 +271,23 @@ class HimGo2Env(ManagerBasedRlEnv):
         """
 
         robot_cfg = SceneEntityCfg(name=cfg.asset.name)
+        joint_cfg = self._entity_term_cfg(cfg)
+        terms = {}
 
+        self._add_reward(terms, cfg, "tracking_lin_vel",
+                         )
 
 
     def _build_observations(self):
-        """
+        """ 构建观测组
         """
 
     def _build_terminations(self):
-        """
+        """  构建回合提前终止条件
         """
 
     def _build_curriculum(self):
-        """
+        """ 构建课程学习机制
         """
 
     
