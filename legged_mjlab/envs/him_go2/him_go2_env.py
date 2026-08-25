@@ -5,6 +5,7 @@ from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.scene import SceneCfg 
 from mjlab.entity import Entity
 from mjlab.sim import MujocoCfg, SimulationCfg
+from mjlab.utils.lab_api.math import quat_apply_inverse
 
 from mjlab.managers import (
     CurriculumTermCfg,
@@ -17,12 +18,12 @@ from mjlab.managers import (
 )
 from mjlab.sensor import (
     ContactMatch,          # 接触匹配规则（用于定义 geom/body 碰撞过滤）
+    ContactSensor,
     ContactSensorCfg,      # 接触力/碰撞传感器配置
     GridPatternCfg,        # 射线扫描网格模式配置
     ObjRef,                # 实体/刚体引用对象
     RayCastSensorCfg,      # 射线投射传感器（测高）配置
 )
-
 from mjlab.terrains import TerrainEntityCfg
 from mjlab.terrains.terrain_generator import TerrainGeneratorCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
@@ -346,4 +347,166 @@ class HimGo2Env(ManagerBasedRlEnv):
         asset: Entity = env.scene[asset_cfg.name]
         return torch.square(asset.data.root_link_lin_vel_b[:, 2])
 
-    
+    def ang_vel_xy(
+        env: ManagerBasedRlEnv,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        return torch.sum(torch.square(asset.data.root_link_ang_vel_b[:, :2]), dim=1)
+
+    def body_orientation_l2(
+        env: ManagerBasedRlEnv,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        """Reward flat base orientation (robot being upright).
+
+        If asset_cfg has body_ids specified, computes the projected gravity
+        for that specific body. Otherwise, uses the root link projected gravity.
+        """
+        asset: Entity = env.scene[asset_cfg.name]
+
+        if asset_cfg.body_ids:
+            body_quat_w = asset.data.body_link_quat_w[:, asset_cfg.body_ids, :]
+            body_quat_w = body_quat_w.squeeze(1)
+            gravity_w = asset.data.gravity_vec_w
+            projected_gravity_b = quat_apply_inverse(body_quat_w, gravity_w)
+            xy_squared = torch.sum(torch.square(projected_gravity_b[:, :2]), dim=1)
+        else:
+            xy_squared = torch.sum(torch.square(asset.data.projected_gravity_b[:, :2]), dim=1)
+        return xy_squared
+
+    def feet_air_time(
+        env: ManagerBasedRlEnv,
+        sensor_name: str,
+        threshold: float = 0.4,
+        command_name: str | None = None,
+        command_threshold: float = 0.1,
+    ) -> torch.Tensor:
+        """Reward feet air time."""
+        sensor: ContactSensor = env.scene[sensor_name]
+        sensor_data = sensor.data
+        air_time = sensor_data.current_air_time
+        contact_time = sensor_data.current_contact_time
+        in_contact = contact_time > 0.0
+        in_mode_time = torch.where(in_contact, contact_time, air_time)
+        single_stance = torch.mean(in_contact.float(), dim=1) == 0.5
+        mode_time = torch.min(
+            torch.where(single_stance.unsqueeze(-1), in_mode_time, 0.0), dim=1
+        )[0]
+        error = torch.abs(mode_time - threshold)
+        reward = torch.clamp(threshold - error, min=0.0)
+        if command_name is not None:
+            command = env.command_manager.get_command(command_name)
+            if command is not None:
+                linear_norm = torch.norm(command[:, :2], dim=1)
+                angular_norm = torch.abs(command[:, 2])
+                total_command = linear_norm + angular_norm
+                scale = (total_command > command_threshold).float()
+                reward *= scale
+        return reward
+
+    def self_collision_cost(
+        env: ManagerBasedRlEnv,
+        sensor_name: str,
+        force_threshold: float = 10.0,
+    ) -> torch.Tensor:
+        """Penalize self-collisions."""
+        sensor: ContactSensor = env.scene[sensor_name]
+        data = sensor.data
+        if data.force_history is not None:
+            force_mag = torch.norm(data.force_history, dim=-1)
+            hit = (force_mag > force_threshold).any(dim=1)
+            return hit.sum(dim=-1).float()
+        assert data.found is not None
+        return data.found.squeeze(-1)
+
+    def hip_pos(
+        env: ManagerBasedRlEnv,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        default_joint_pos = asset.data.default_joint_pos
+        assert default_joint_pos is not None
+        diff_angle = (
+            asset.data.joint_pos[:, asset_cfg.joint_ids]
+            - default_joint_pos[:, asset_cfg.joint_ids]
+        )
+        return torch.sum(torch.square(diff_angle), dim=1)
+
+    def _base_height_l2(env, target_height: float, asset_cfg: SceneEntityCfg):
+        asset = env.scene[asset_cfg.name]
+        height = asset.data.root_link_pos_w[:, 2] - env.scene.env_origins[:, 2]
+        return torch.square(height - target_height)
+
+    def feet_clearance(
+        env: ManagerBasedRlEnv,
+        target_height: float,
+        command_name: str | None = None,
+        command_threshold: float = 0.1,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        foot_z = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]
+        foot_vel_xy = asset.data.site_lin_vel_w[:, asset_cfg.site_ids, :2]
+        vel_norm = torch.norm(foot_vel_xy, dim=-1)
+        delta = torch.abs(foot_z - target_height)
+        cost = torch.sum(delta * vel_norm, dim=1)
+        if command_name is not None:
+            command = env.command_manager.get_command(command_name)
+            if command is not None:
+                linear_norm = torch.norm(command[:, :2], dim=1)
+                angular_norm = torch.abs(command[:, 2])
+                total_command = linear_norm + angular_norm
+                active = (total_command > command_threshold).float()
+                cost = cost * active
+        return cost
+
+    def _joint_power_l1(env, asset_cfg: SceneEntityCfg):
+        asset = env.scene[asset_cfg.name]
+        torque = asset.data.qfrc_actuator[:, asset_cfg.joint_ids]
+        velocity = asset.data.joint_vel[:, asset_cfg.joint_ids]
+        return torch.sum(torch.abs(torque * velocity), dim=1)
+
+    def stand_still(
+        env: ManagerBasedRlEnv,
+        command_name: str,
+        command_threshold: float = 0.1,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        diff_angle = asset.data.joint_pos[:, asset_cfg.joint_ids] - asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+        reward = torch.sum(torch.square(diff_angle), dim=1)
+        if command_name is not None:
+            command = env.command_manager.get_command(command_name)
+            if command is not None:
+                linear_norm = torch.norm(command[:, :2], dim=1)
+                angular_norm = torch.abs(command[:, 2])
+                total_command = linear_norm + angular_norm
+                scale = (total_command <= command_threshold).float()
+                reward *= scale
+        return reward
+
+    def _torque_limit_cost(
+        env,
+        soft_limit: float,
+        asset_cfg: SceneEntityCfg,
+    ):
+        """Penalize actuator output above each configured Ideal-PD effort limit."""
+
+        asset = env.scene[asset_cfg.name]
+        force = asset.data.actuator_force
+        limits = torch.full_like(force, float("inf"))
+
+        # Go2Asset creates three IdealPdActuator groups.  Their force_limit tensors
+        # are per-environment, so the term also remains valid after effort-limit DR.
+        for actuator in asset.actuators:
+            force_limit = getattr(actuator, "force_limit", None)
+            if force_limit is None:
+                continue
+            limits[:, actuator.ctrl_ids] = force_limit
+
+        force = force[:, asset_cfg.actuator_ids]
+        limits = limits[:, asset_cfg.actuator_ids]
+        denominator = torch.clamp(limits * max(float(soft_limit), 1.0e-6), min=1.0e-6)
+        excess = torch.relu(torch.abs(force) / denominator - 1.0)
+        return torch.sum(torch.square(excess), dim=1)
