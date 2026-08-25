@@ -5,6 +5,15 @@ from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.scene import SceneCfg 
 from mjlab.sim import MujocoCfg, SimulationCfg
 
+from mjlab.managers import (
+    CurriculumTermCfg,
+    EventTermCfg,
+    ObservationGroupCfg,
+    ObservationTermCfg,
+    RewardTermCfg,
+    SceneEntityCfg,
+    TerminationTermCfg,
+)
 from mjlab.sensor import (
     ContactMatch,          # 接触匹配规则（用于定义 geom/body 碰撞过滤）
     ContactSensorCfg,      # 接触力/碰撞传感器配置
@@ -182,6 +191,7 @@ class HimGo2Env(ManagerBasedRlEnv):
                 ),
 
             )
+        
 
     def _joint_names(cfg):
         """ 从默认关节角字典中提取全部关节名元组，保持严格的顺序
@@ -232,9 +242,37 @@ class HimGo2Env(ManagerBasedRlEnv):
         """
         return cfg.rewards.scales.get(name, 0.0)
 
-    def _build_rewards(self):
+    def _add_reward(cls, terms, cfg, name, func, params=None):
+        """ 添加注册奖励函数
         """
+        weight = cls._reward_scale(cfg, name)
+
+        if weight == 0.0:
+            return
+
+        terms[name] = RewardTermCfg(
+            func=func,
+            weight=weight,
+            params=dict(params or {}),
+        )
+
+    def _entity_term_cfg(self, cfg):
+        """ 
         """
+        return SceneEntityCfg(
+            name=cfg.asset.name,
+            joint_names=self._joint_names(cfg),
+            preserve_order=True,
+        )
+
+    def _build_rewards(self, cfg):
+        """ 
+            官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/rewards.html
+        """
+
+        robot_cfg = SceneEntityCfg(name=cfg.asset.name)
+
+
 
     def _build_observations(self):
         """
