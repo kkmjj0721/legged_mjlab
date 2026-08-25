@@ -84,7 +84,7 @@ class HimGo2Env(ManagerBasedRlEnv):
         return SceneCfg(
             num_envs = cfg.env.num_envs,                                                # 环境数
             env_spacing = cfg.env.env_spacing,                                          # 并行环境间的网格间距
-            terrain = self._build_terrain(cfg, play = play),                            # 挂载地形实体
+            terrain = self._build_terrain(cfg),                            # 挂载地形实体
             entities = {asset.entity.get_robot_cfg()},                                  # 挂载机器人的 MJCF 实体配置
             sensors = tuple(                                                            # 构建并挂载传感器元组
                 self._build_sensors(cfg, entity_name, debug_vis = debug_vis)
@@ -154,8 +154,9 @@ class HimGo2Env(ManagerBasedRlEnv):
 
         return sensors
 
-    def _build_terrain(self, cfg, play=False):
+    def _build_terrain(self, cfg):
         """
+            官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/terrain.html
         """
         # plane
         if cfg.terrain.mesh_type == "plane":
@@ -174,10 +175,13 @@ class HimGo2Env(ManagerBasedRlEnv):
                     size = (cfg.terrain.terrain_length, cfg.terrain.terrain_width),                 # 子地形大小
                     num_rows = cfg.terrain.num_rows,                                                # 地形行数（难度等级）
                     num_cols = cfg.terrain.num_cols,                                                # 地形列数（地形类型）
+                    border_width = cfg.terrain.border_size,                                         # 边界宽度
+                    sub_terrains = {
 
+                    },
                 ),
-            )
 
+            )
 
     def _joint_names(cfg):
         """ 从默认关节角字典中提取全部关节名元组，保持严格的顺序
@@ -214,17 +218,19 @@ class HimGo2Env(ManagerBasedRlEnv):
             )
         }
 
-
     def _build_events(self, cfg, play):
         """ 
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/events.html
         """
 
-
-
     def _build_commands(self):
         """
         """
+
+    def _reward_scale(cfg, name):
+        """ 返回指定奖励项的缩放系数，若不存在则返回 0
+        """
+        return cfg.rewards.scales.get(name, 0.0)
 
     def _build_rewards(self):
         """
