@@ -93,8 +93,10 @@ class HimGo2Env(ManagerBasedRlEnv):
         return SceneCfg(
             num_envs = cfg.env.num_envs,                                                # 环境数
             env_spacing = cfg.env.env_spacing,                                          # 并行环境间的网格间距
-            terrain = self._build_terrain(cfg),                            # 挂载地形实体
-            entities = {asset.entity.get_robot_cfg()},                                  # 挂载机器人的 MJCF 实体配置
+            terrain = self._build_terrain(cfg),                                         # 挂载地形实体
+            entities = {                                                                # 挂载机器人的 MJCF 实体配置
+                entity_name: asset.entity.get_robot_cfg()
+            },                                  
             sensors = tuple(                                                            # 构建并挂载传感器元组
                 self._build_sensors(cfg, entity_name, debug_vis = debug_vis)
             ),
