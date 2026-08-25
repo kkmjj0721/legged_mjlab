@@ -14,7 +14,7 @@ from mjlab.sensor import (
 )
 
 from mjlab.terrains import TerrainEntityCfg
-
+from mjlab.envs.mdp.actions import JointPositionActionCfg
 
 
 
@@ -53,7 +53,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             decimation = cfg.control.decimation,                            # 控制步
             scene = self._build_scene(cfg, asset, play, debug_vis),         # 构建场景（包含实体、传感器、地形）
             observations = self._build_observations(),                      # 挂载观测管理器配置
-            actions = self._build_actions(),                                # 挂载动作管理器配置
+            actions = self._build_actions(cfg),                             # 挂载动作管理器配置
             events = ,
             seed = cfg.env.seed,                                            # 随机种子
             sim = SimulationCfg(                                            # 仿真引擎底层设置
@@ -72,7 +72,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             recorders = ,
             is_finite_horizon = ,
             auto_reset = ,
-            scale_rewards_by_dt = ,
+            scale_rewards_by_dt = False,
         )
 
     def _build_scene(self, cfg, asset, play, debug_vis = False):
@@ -168,11 +168,47 @@ class HimGo2Env(ManagerBasedRlEnv):
         # terrain
 
 
+    def _joint_names(cfg):
+        """ 从默认关节角字典中提取全部关节名元组，保持严格的顺序
+        """
+        return tuple(cfg.init_state.default_joint_angles.keys())
+
+    def _build_actions(self, cfg):
+        """ 构建关节位置动作空间：输出值经 action_scale 缩放后，加到 default 关节偏置上
+            官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/actions.html
+        """
+        joint_names = self._joint_names(cfg)
+
+        action_scales = {}
+        for name in joint_names:
+            if "hip" in name:
+                action_scales[name] = float(cfg.control.action_scale * cfg.control.hip_scale_reduction)
+            else:
+                action_scales[name] = float(cfg.control.action_scale)
+
+        clip_val = cfg.control.action_clip
+        if isinstance(clip_val, (int, float)):
+            action_clip = (-float(clip_val), float(clip_val))
+        else:
+            action_clip = clip_val
+
+        return {
+            "joint_position": JointPositionActionCfg(
+                entity_name = cfg.asset.name,
+                actuator_name = joint_names,
+                scale = action_scales,    
+                use_default_offset = True,                  # 使用位置增量
+                preserve_order = True,                      # 严格保持关节顺序与 policy 输出对齐
+                clip = action_clip,
+            )
+        }
+
+    def _build_events(self, cfg, play):
+        """ 
+            官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/events.html
+        """
 
 
-    def _build_actions(self):
-        """
-        """
 
     def _build_commands(self):
         """
