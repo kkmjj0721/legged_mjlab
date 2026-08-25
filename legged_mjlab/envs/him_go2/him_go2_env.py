@@ -3,6 +3,7 @@ import torch
 
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.scene import SceneCfg 
+from mjlab.entity import Entity
 from mjlab.sim import MujocoCfg, SimulationCfg
 
 from mjlab.managers import (
@@ -31,6 +32,8 @@ from mjlab.envs.mdp.actions import JointPositionActionCfg
 from legged_mjlab.envs.him_go2.go2_asset import Go2Asset
 from legged_mjlab.envs.him_go2.him_go2_config import HimGo2RoughCfg
 
+
+_DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
 
 class HimGo2Env(ManagerBasedRlEnv):
@@ -235,6 +238,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/events.html
         """
 
+
     def _build_commands(self):
         """
         """
@@ -295,3 +299,51 @@ class HimGo2Env(ManagerBasedRlEnv):
     
 
         
+# ----------------- rewards -----------------
+
+    def track_linear_velocity(
+        env: ManagerBasedRlEnv,
+        std: float,
+        command_name: str,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        """Reward for tracking the commanded base linear velocity.
+
+        The commanded z velocity is assumed to be zero.
+        """
+        asset: Entity = env.scene[asset_cfg.name]
+        command = env.command_manager.get_command(command_name)
+        assert command is not None, f"Command '{command_name}' not found."
+        actual = asset.data.root_link_lin_vel_b
+        xy_error = torch.sum(torch.square(command[:, :2] - actual[:, :2]), dim=1)
+        z_error = torch.square(actual[:, 2])
+        lin_vel_error = xy_error + (2 * z_error)
+        return torch.exp(-lin_vel_error / std**2)
+
+    def track_angular_velocity(
+        env: ManagerBasedRlEnv,
+        std: float,
+        command_name: str,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        """Reward heading error for heading-controlled envs, angular velocity for others.
+
+        The commanded xy angular velocities are assumed to be zero.
+        """
+        asset: Entity = env.scene[asset_cfg.name]
+        command = env.command_manager.get_command(command_name)
+        assert command is not None, f"Command '{command_name}' not found."
+        actual = asset.data.root_link_ang_vel_b
+        z_error = torch.square(command[:, 2] - actual[:, 2])
+        xy_error = torch.sum(torch.square(actual[:, :2]), dim=1)
+        ang_vel_error = z_error + (0.05 * xy_error)
+        return torch.exp(-ang_vel_error / std**2)
+
+    def lin_vel_z(
+        env: ManagerBasedRlEnv,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        return torch.square(asset.data.root_link_lin_vel_b[:, 2])
+
+    
