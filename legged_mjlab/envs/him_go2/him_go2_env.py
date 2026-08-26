@@ -7,6 +7,7 @@ from mjlab.entity import Entity
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.envs import mdp as envs_mdp
 from mjlab.tasks.velocity import mdp
+import mjlab.terrains as terrain_gen
 from mjlab.utils.lab_api.math import quat_apply_inverse
 
 from mjlab.managers import (
@@ -30,11 +31,8 @@ from mjlab.terrains import TerrainEntityCfg
 from mjlab.terrains.terrain_generator import TerrainGeneratorCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 
-
-
 from legged_mjlab.envs.him_go2.go2_asset import Go2Asset
 from legged_mjlab.envs.him_go2.him_go2_config import HimGo2RoughCfg
-
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
@@ -194,14 +192,47 @@ class HimGo2Env(ManagerBasedRlEnv):
                     num_cols = cfg.terrain.num_cols,                                                # 地形列数（地形类型）
                     border_width = cfg.terrain.border_size,                                         # 边界宽度
                     sub_terrains = {
+                        # 1. 平坦地面类型
+                        "flat": terrain_gen.BoxFlatTerrainCfg(
+                            proportion = 0.2        # 占比 20%
+                        ),
 
+                        # 2.金字塔台阶地形类型（楼梯）
+                        "stairs": terrain_gen.BoxPyramidStairsTerrainCfg(
+                            proportion = 0.2,                             
+                            step_height_range = (0.0, 0.20),              # 台阶高度范围（难度从 0.0m 逐渐加大到 0.20m）
+                            step_width = 0.3,                             # 每个台阶的踏步宽度为 0.3 米
+                            platform_width = 2.0,                         # 金字塔顶部的中央平坦平台宽度为 2.0 米
+                        ),
+
+                        # 3. 随机高度场崎岖地形类型（碎石路、粗糙砂石地面）
+                        "rough": terrain_gen.HfRandomUniformTerrainCfg(
+                            proportion = 0.2,                 
+                            noise_range = (0.02, 0.10),       # 随机起伏高度范围（噪声幅度从 2cm 逐渐增加到 10cm）
+                            noise_step = 0.02,                # 噪声高度的离散采样步长为 0.02 米
+                        ),
+
+                        # 4. 柏林噪声连续起伏地形（缓坡/土丘/旷野）
+                        "perlin_noise": terrain_gen.HfPerlinNoiseTerrainCfg(
+                            proportion=0.2,
+                            noise_range = (0.05, 0.30),                   # 波峰/土丘最大起伏高度（从 5cm 递增至 30cm）
+                            noise_step=0.02,  
+                        ),
+
+                        # 5. 离散凸起障碍高度场（随机柱状/方块障碍)
+                        "discrete_obstacles": terrain_gen.HfDiscreteObstaclesTerrainCfg(
+                            proportion = 0.2,
+                            obstacle_height_range = (0.05, 0.20),           # 障碍高度范围（从 5cm 递增至 20cm）
+                            obstacle_width_range = (0.4, 0.8),              # 障碍物宽度/边长范围（0.4m ~ 0.8m）
+                            num_obstacles = 12,                             # 每个子地形块内生成的障碍物数量
+                            platform_width = 1.5,                           # 中心预留平坦出生区域宽度（避免出生直接卡入障碍）
+                        )
                     },
                 ),
-
+                max_init_terrain_level = 5
             )
         
-
-    def _joint_names(cfg):
+    def _joint_names(self, cfg):
         """ 从默认关节角字典中提取全部关节名元组，保持严格的顺序
         """
         return tuple(cfg.init_state.default_joint_angles.keys())
@@ -240,7 +271,6 @@ class HimGo2Env(ManagerBasedRlEnv):
         """ 构建重置事件与域随机化
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/events.html
         """
-
 
     def _build_commands(self, cfg):
         """
@@ -285,8 +315,7 @@ class HimGo2Env(ManagerBasedRlEnv):
         joint_cfg = self._entity_term_cfg(cfg)
         terms = {}
 
-        self._add_reward(terms, cfg, "tracking_lin_vel",
-                         )
+        
 
 
     def _noise(cfg, field: str):
@@ -295,9 +324,11 @@ class HimGo2Env(ManagerBasedRlEnv):
 
 
 
-    def _build_observations(self):
+    def _build_observations(self, cfg, play: bool):
         """ 构建观测组
+            官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/observations.html
         """
+        
 
 
     def _build_terminations(self, cfg):

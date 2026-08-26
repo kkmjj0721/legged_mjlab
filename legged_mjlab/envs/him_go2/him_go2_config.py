@@ -10,7 +10,7 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
             num_one_step_observations = 45
             history_length = 6
             num_observations = num_one_step_observations * history_length
-            num_privileged_obs = num_one_step_observations + 3 + 4 + 187   # if not None, critic uses privileged_obs
+            num_privileged_obs = num_one_step_observations + 3 + 187   # if not None, critic uses privileged_obs
             num_actions = 12
             env_spacing = 3.0  # [m] spacing between sub-environments
             send_timeouts = True  # send time out information to algorithm
