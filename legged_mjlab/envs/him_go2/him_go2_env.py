@@ -57,6 +57,11 @@ class HimGo2Env(ManagerBasedRlEnv):
             render_mode = render_mode,
         )
 
+    def __init_buffer(self):
+        """ 从 cfg 中获取一些配置，防止多次去访问等
+        """
+        
+
 
     def _build_mjlab_managercfg(self, cfg, play=False, debug_vis = False) -> ManagerBasedRlEnvCfg:
         """ 将 HimGo2RoughCfg 转换为 ManagerBasedRlEnvCfg 以便于使用 mjlab 的管理器进行环境管理。
@@ -163,8 +168,6 @@ class HimGo2Env(ManagerBasedRlEnv):
                 )
             )
 
-        if :
-            pass
         
 
         return sensors
@@ -315,21 +318,49 @@ class HimGo2Env(ManagerBasedRlEnv):
         joint_cfg = self._entity_term_cfg(cfg)
         terms = {}
 
-        
+    def _get_noise(self, cfg):
+        """ 获取噪声
+        """
 
-
-    def _noise(cfg, field: str):
-        if cfg.noise.add_noise:
-            level = float(cfg.noise.noise_level)
-
-
+        return 
 
     def _build_observations(self, cfg, play: bool):
         """ 构建观测组
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/observations.html
         """
-        
+        entity_name = cfg.asset.name
 
+        joint_cfg = SceneEntityCfg(
+            entity_name,
+            joint_names = self._joint_names(cfg),
+            preserve_order = True,
+        )
+
+        noise = {}
+        obs_delay = []
+
+        if play:
+            noise = {}
+        elif cfg.noise.add.add_noise:
+            self._get_noise(cfg)
+        else:
+            noise = {}
+
+        # actor_obs
+        actor_terms = {
+            # cmd + ang + gra + pos + vel + last_action
+            "command": ObservationTermCfg(
+                func = envs_mdp.generated_commands,
+                params = {"command_name": "twist"},
+            ),
+            "base_ang_vel": ObservationTermCfg(
+                func = envs_mdp.builtin_sensor,
+                params = {"sensor_name": f"{entity_name}/imu_ang_vel"},
+                noise = noise.get("ang_vel"),
+                scale = float(cfg.normalization.obs_scales.ang_vel),
+            )
+
+        }
 
     def _build_terminations(self, cfg):
         """ 构建回合提前终止条件

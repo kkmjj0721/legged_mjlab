@@ -151,20 +151,17 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
             motor_strength_range = [0.8, 1.2]
             
             # ---------------------------------- 观测延迟随机化 ------------------------------------ #
-            add_obs_latency = False
-    
             # 电机观测延迟
-            randomize_obs_motor_latency = False
+            randomize_obs_motor_latency = True
             range_obs_motor_latency = [1, 4]
 
-    
             # IMU 观测延迟
-            randomize_obs_imu_latency = False
+            randomize_obs_imu_latency = True
             range_obs_imu_latency = [1, 3]
     
             # ---------------------------------- 动作指令延迟随机化 --------------------------------- #
             # 动作指令延迟
-            randomize_cmd_action_latency = False
+            randomize_cmd_action_latency = True
             range_cmd_action_latency = [1, 4]
             action_hold_prob = 0.3
 
