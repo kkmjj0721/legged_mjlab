@@ -5,6 +5,8 @@ from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.scene import SceneCfg 
 from mjlab.entity import Entity
 from mjlab.sim import MujocoCfg, SimulationCfg
+from mjlab.envs import mdp as envs_mdp
+from mjlab.tasks.velocity import mdp
 from mjlab.utils.lab_api.math import quat_apply_inverse
 
 from mjlab.managers import (
@@ -48,7 +50,7 @@ class HimGo2Env(ManagerBasedRlEnv):
         self.cfg = cfg
         self.play = bool(play)
 
-        self.managercfg = self._build_mjlab_managercfg(self.cfg, self.play, debug_vis)
+        self.managercfg = self._build_mjlab_managercfg(self.cfg, play = self.play, debug_vis = debug_vis)
 
         # 完成底层 MuJoCo 仿真器与各 Manager 的实例化
         super().__init__(
@@ -79,9 +81,9 @@ class HimGo2Env(ManagerBasedRlEnv):
             viewer = ,
             episode_length_s = cfg.env.episode_length_s,                    # 单回合最长时间
             rewards = ,
-            terminations = ,
+            terminations = self._build_terminations(cfg),                   # 挂载终止条件管理器配置
             commands = ,
-            curriculum = ,
+            curriculum = self._build_curriculum(cfg),
             metrics = , 
             recorders = ,
             is_finite_horizon = ,
@@ -285,20 +287,55 @@ class HimGo2Env(ManagerBasedRlEnv):
                          )
 
 
+    def _noise(cfg, field: str):
+        if cfg.noise.add_noise:
+            level = float(cfg.noise.noise_level)
+
+
+
     def _build_observations(self):
         """ 构建观测组
         """
 
-    def _build_terminations(self):
-        """  构建回合提前终止条件
-        """
 
-    def _build_curriculum(self):
-        """ 构建课程学习机制
+    def _build_terminations(self, cfg):
+        """ 构建回合提前终止条件
+            官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/terminations.html
         """
-
+        
+        return {
+            "time_out": TerminationTermCfg(
+                func=envs_mdp.time_out,
+                time_out=True,
+            ),
+        }
     
+    def _build_curriculum(self, cfg, play):
+        """ 构建课程学习机制
+            官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/curriculum.html
+        """
+        curriculums = {}
 
+        if play:
+            return curriculums
+
+        if cfg.terrain.curriculum:
+            curriculums["terrain_levels"] = CurriculumTermCfg(
+                func=mdp.terrain_levels_vel,
+                params={"command_name": "twist"},
+            )
+
+        if cfg.commands.curriculum:
+            curriculums["commands_levels"] = CurriculumTermCfg(
+                func = mdp.commands_vel,
+                params={
+                    "command_name": "twist",
+                    "max_lin_vel_x": cfg.commands.max_curriculum,
+                    "max_ang_vel_yaw": cfg.commands.max_curriculum,
+                },
+            )
+
+        return curriculums
         
 # ----------------- rewards -----------------
 
@@ -510,3 +547,6 @@ class HimGo2Env(ManagerBasedRlEnv):
         denominator = torch.clamp(limits * max(float(soft_limit), 1.0e-6), min=1.0e-6)
         excess = torch.relu(torch.abs(force) / denominator - 1.0)
         return torch.sum(torch.square(excess), dim=1)
+
+
+    
