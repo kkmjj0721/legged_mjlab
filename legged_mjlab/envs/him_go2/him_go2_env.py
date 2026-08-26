@@ -57,24 +57,19 @@ class HimGo2Env(ManagerBasedRlEnv):
             render_mode = render_mode,
         )
 
-    def __init_buffer(self):
-        """ 从 cfg 中获取一些配置，防止多次去访问等
-        """
-        
 
-
-    def _build_mjlab_managercfg(self, cfg, play=False, debug_vis = False) -> ManagerBasedRlEnvCfg:
+    def _build_mjlab_managercfg(self, play=False, debug_vis = False) -> ManagerBasedRlEnvCfg:
         """ 将 HimGo2RoughCfg 转换为 ManagerBasedRlEnvCfg 以便于使用 mjlab 的管理器进行环境管理。
         """
-        asset = Go2Asset(cfg)
+        asset = Go2Asset(self.cfg)
 
         return ManagerBasedRlEnvCfg(
-            decimation = cfg.control.decimation,                            # 控制步
-            scene = self._build_scene(cfg, asset, play, debug_vis),         # 构建场景（包含实体、传感器、地形）
+            decimation = self.cfg.control.decimation,                       # 控制步
+            scene = self._build_scene(asset, play, debug_vis),              # 构建场景（包含实体、传感器、地形）
             observations = self._build_observations(),                      # 挂载观测管理器配置
-            actions = self._build_actions(cfg),                             # 挂载动作管理器配置
+            actions = self._build_actions(),                                # 挂载动作管理器配置
             events = ,
-            seed = cfg.env.seed,                                            # 随机种子
+            seed = self.cfg.env.seed,                                            # 随机种子
             sim = SimulationCfg(                                            # 仿真引擎底层设置
                 mujoco = MujocoCfg(
                     timestep = cfg.sim.dt,          # 物理仿真步长
@@ -82,36 +77,36 @@ class HimGo2Env(ManagerBasedRlEnv):
                 )
             ),                                             
             viewer = ,
-            episode_length_s = cfg.env.episode_length_s,                    # 单回合最长时间
+            episode_length_s = self.cfg.env.episode_length_s,               # 单回合最长时间
             rewards = ,
-            terminations = self._build_terminations(cfg),                   # 挂载终止条件管理器配置
+            terminations = self._build_terminations(),                      # 挂载终止条件管理器配置
             commands = ,
-            curriculum = self._build_curriculum(cfg),
+            curriculum = self._build_curriculum(),
             metrics = , 
             recorders = ,
             is_finite_horizon = ,
             scale_rewards_by_dt = False,
         )
 
-    def _build_scene(self, cfg, asset, play, debug_vis = False):
+    def _build_scene(self, asset, play, debug_vis = False):
         """ 构建场景对象，包含地形和机器人实体
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/scene.html
         """
-        entity_name = cfg.asset.name
+        entity_name = self.cfg.asset.name
 
         return SceneCfg(
-            num_envs = cfg.env.num_envs,                                                # 环境数
-            env_spacing = cfg.env.env_spacing,                                          # 并行环境间的网格间距
+            num_envs = self.cfg.env.num_envs,                                           # 环境数
+            env_spacing = self.cfg.env.env_spacing,                                     # 并行环境间的网格间距
             terrain = self._build_terrain(cfg),                                         # 挂载地形实体
             entities = {                                                                # 挂载机器人的 MJCF 实体配置
                 entity_name: asset.entity.get_robot_cfg()
             },                                  
             sensors = tuple(                                                            # 构建并挂载传感器元组
-                self._build_sensors(cfg, entity_name, debug_vis = debug_vis)
+                self._build_sensors(entity_name, debug_vis = debug_vis)
             ),
         )
 
-    def _build_sensors(self, cfg, entity_name, debug_vis):
+    def _build_sensors(self, entity_name, debug_vis):
         """ 构建
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/sensors/index.html
         """
@@ -123,7 +118,7 @@ class HimGo2Env(ManagerBasedRlEnv):
 
         sensors = []
 
-        if cfg.rewards.scales.feet_air_time:
+        if self.cfg.rewards.scales.feet_air_time:
             sensors.append(
                 ContactSensorCfg(
                     name="feet_ground_contact",                     # 传感器名称
@@ -143,9 +138,9 @@ class HimGo2Env(ManagerBasedRlEnv):
                 )
             )
 
-        if cfg.terrain.measure_heights:
-            x_points = tuple(cfg.terrain.measured_points_x)
-            y_points = tuple(cfg.terrain.measured_points_y)
+        if self.cfg.terrain.measure_heights:
+            x_points = tuple(self.cfg.terrain.measured_points_x)
+            y_points = tuple(self.cfg.terrain.measured_points_y)
 
             sensors.append(
                 RayCastSensorCfg(
@@ -160,7 +155,7 @@ class HimGo2Env(ManagerBasedRlEnv):
                             max(x_points) - min(x_points),  # 网格长
                             max(y_points) - min(y_points),  # 网格宽
                         ),
-                        resolution = cfg.terrain.horizontal_scale,  # 采样分辨率
+                        resolution = self.cfg.terrain.horizontal_scale,  # 采样分辨率
                     ),
                     ray_alignment = "yaw",
                     max_distance = 2.0,              
@@ -172,12 +167,12 @@ class HimGo2Env(ManagerBasedRlEnv):
 
         return sensors
 
-    def _build_terrain(self, cfg):
+    def _build_terrain(self):
         """ 构建训练/测试地形（平面地形或基于课程进阶的程序化生成地形）
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/terrain.html
         """
         # plane
-        if cfg.terrain.mesh_type == "plane":
+        if self.cfg.terrain.mesh_type == "plane":
             return TerrainEntityCfg(
                 terrain_type="plane",
                 terrain_generator=None,
@@ -185,15 +180,15 @@ class HimGo2Env(ManagerBasedRlEnv):
             )
 
         # terrain
-        if cfg.terrain.mesh_type == "generator":
+        if self.cfg.terrain.mesh_type == "generator":
             return TerrainEntityCfg(
                 terrain_type = "generator",
                 terrain_generator = TerrainGeneratorCfg(
                     curriculum = True,
-                    size = (cfg.terrain.terrain_length, cfg.terrain.terrain_width),                 # 子地形大小
-                    num_rows = cfg.terrain.num_rows,                                                # 地形行数（难度等级）
-                    num_cols = cfg.terrain.num_cols,                                                # 地形列数（地形类型）
-                    border_width = cfg.terrain.border_size,                                         # 边界宽度
+                    size = (self.cfg.terrain.terrain_length, self.cfg.terrain.terrain_width),            # 子地形大小
+                    num_rows = self.cfg.terrain.num_rows,                                                # 地形行数（难度等级）
+                    num_cols = self.cfg.terrain.num_cols,                                                # 地形列数（地形类型）
+                    border_width = self.cfg.terrain.border_size,                                         # 边界宽度
                     sub_terrains = {
                         # 1. 平坦地面类型
                         "flat": terrain_gen.BoxFlatTerrainCfg(
@@ -235,25 +230,25 @@ class HimGo2Env(ManagerBasedRlEnv):
                 max_init_terrain_level = 5
             )
         
-    def _joint_names(self, cfg):
+    def _joint_names(self):
         """ 从默认关节角字典中提取全部关节名元组，保持严格的顺序
         """
-        return tuple(cfg.init_state.default_joint_angles.keys())
+        return tuple(self.cfg.init_state.default_joint_angles.keys())
 
-    def _build_actions(self, cfg):
+    def _build_actions(self):
         """ 构建关节位置动作空间：输出值经 action_scale 缩放后，加到 default 关节偏置上
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/actions.html
         """
-        joint_names = self._joint_names(cfg)
+        joint_names = self._joint_names()
 
         action_scales = {}
         for name in joint_names:
             if "hip" in name:
-                action_scales[name] = float(cfg.control.action_scale * cfg.control.hip_scale_reduction)
+                action_scales[name] = float(self.cfg.control.action_scale * self.cfg.control.hip_scale_reduction)
             else:
-                action_scales[name] = float(cfg.control.action_scale)
+                action_scales[name] = float(self.cfg.control.action_scale)
 
-        clip_val = cfg.control.action_clip
+        clip_val = self.cfg.control.action_clip
         if isinstance(clip_val, (int, float)):
             action_clip = (-float(clip_val), float(clip_val))
         else:
@@ -261,7 +256,7 @@ class HimGo2Env(ManagerBasedRlEnv):
 
         return {
             "joint_position": JointPositionActionCfg(
-                entity_name = cfg.asset.name,
+                entity_name = self.cfg.asset.name,
                 actuator_name = joint_names,
                 scale = action_scales,    
                 use_default_offset = True,                  # 使用位置增量
@@ -275,21 +270,21 @@ class HimGo2Env(ManagerBasedRlEnv):
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/events.html
         """
 
-    def _build_commands(self, cfg):
+    def _build_commands(self):
         """
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/commands.html
         """
-        ranges = cfg.commands.ranges
+        ranges = self.cfg.commands.ranges
 
-    def _reward_scale(cfg, name):
+    def _reward_scale(self, name):
         """ 返回指定奖励项的缩放系数，若不存在则返回 0
         """
-        return cfg.rewards.scales.get(name, 0.0)
+        return self.cfg.rewards.scales.get(name, 0.0)
 
-    def _add_reward(self, terms, cfg, name, func, params=None):
+    def _add_reward(self, terms, name, func, params=None):
         """ 通用奖励项注册辅助函数：仅当权重非零时才加入计算图
         """
-        weight = self._reward_scale(cfg, name)
+        weight = self._reward_scale(self.cfg, name)
 
         if weight == 0.0:
             return
@@ -300,49 +295,42 @@ class HimGo2Env(ManagerBasedRlEnv):
             params = dict(params or {}),
         )
 
-    def _entity_term_cfg(self, cfg):
+    def _entity_term_cfg(self):
         """ 
         """
         return SceneEntityCfg(
-            name=cfg.asset.name,
-            joint_names=self._joint_names(cfg),
+            name=self.cfg.asset.name,
+            joint_names=self._joint_names(),
             preserve_order=True,
         )
 
-    def _build_rewards(self, cfg):
+    def _build_rewards(self):
         """ 
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/rewards.html
         """
 
-        robot_cfg = SceneEntityCfg(name=cfg.asset.name)
-        joint_cfg = self._entity_term_cfg(cfg)
+        robot_cfg = SceneEntityCfg(name = self.cfg.asset.name)
+        joint_cfg = self._entity_term_cfg()
         terms = {}
 
-    def _get_noise(self, cfg):
-        """ 获取噪声
-        """
-
-        return 
-
-    def _build_observations(self, cfg, play: bool):
+    def _build_observations(self, play: bool):
         """ 构建观测组
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/observations.html
         """
-        entity_name = cfg.asset.name
+        entity_name = self.cfg.asset.name
 
         joint_cfg = SceneEntityCfg(
             entity_name,
-            joint_names = self._joint_names(cfg),
+            joint_names = self._joint_names(),
             preserve_order = True,
         )
 
         noise = {}
-        obs_delay = []
 
         if play:
             noise = {}
-        elif cfg.noise.add.add_noise:
-            self._get_noise(cfg)
+        elif self.cfg.noise.add.add_noise:
+            self._get_noise()
         else:
             noise = {}
 
@@ -357,12 +345,14 @@ class HimGo2Env(ManagerBasedRlEnv):
                 func = envs_mdp.builtin_sensor,
                 params = {"sensor_name": f"{entity_name}/imu_ang_vel"},
                 noise = noise.get("ang_vel"),
-                scale = float(cfg.normalization.obs_scales.ang_vel),
-            )
+                scale = float(self.cfg.normalization.obs_scales.ang_vel),
+
+            ),
+
 
         }
 
-    def _build_terminations(self, cfg):
+    def _build_terminations(self):
         """ 构建回合提前终止条件
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/terminations.html
         """
@@ -374,7 +364,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             ),
         }
     
-    def _build_curriculum(self, cfg, play):
+    def _build_curriculum(self, play):
         """ 构建课程学习机制
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/curriculum.html
         """
@@ -383,19 +373,19 @@ class HimGo2Env(ManagerBasedRlEnv):
         if play:
             return curriculums
 
-        if cfg.terrain.curriculum:
+        if self.cfg.terrain.curriculum:
             curriculums["terrain_levels"] = CurriculumTermCfg(
                 func=mdp.terrain_levels_vel,
                 params={"command_name": "twist"},
             )
 
-        if cfg.commands.curriculum:
+        if self.cfg.commands.curriculum:
             curriculums["commands_levels"] = CurriculumTermCfg(
                 func = mdp.commands_vel,
                 params={
                     "command_name": "twist",
-                    "max_lin_vel_x": cfg.commands.max_curriculum,
-                    "max_ang_vel_yaw": cfg.commands.max_curriculum,
+                    "max_lin_vel_x": self.cfg.commands.max_curriculum,
+                    "max_ang_vel_yaw": self.cfg.commands.max_curriculum,
                 },
             )
 
