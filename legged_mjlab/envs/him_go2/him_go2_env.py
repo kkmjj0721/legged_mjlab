@@ -72,8 +72,8 @@ class HimGo2Env(ManagerBasedRlEnv):
             seed = self.cfg.env.seed,                                            # 随机种子
             sim = SimulationCfg(                                            # 仿真引擎底层设置
                 mujoco = MujocoCfg(
-                    timestep = cfg.sim.dt,          # 物理仿真步长
-                    integrator = cfg.sim.gravity,   # 重力向量
+                    timestep = self.cfg.sim.dt,          # 物理仿真步长
+                    integrator = self.cfg.sim.gravity,   # 重力向量
                 )
             ),                                             
             viewer = ,
@@ -97,7 +97,7 @@ class HimGo2Env(ManagerBasedRlEnv):
         return SceneCfg(
             num_envs = self.cfg.env.num_envs,                                           # 环境数
             env_spacing = self.cfg.env.env_spacing,                                     # 并行环境间的网格间距
-            terrain = self._build_terrain(cfg),                                         # 挂载地形实体
+            terrain = self._build_terrain(),                                            # 挂载地形实体
             entities = {                                                                # 挂载机器人的 MJCF 实体配置
                 entity_name: asset.entity.get_robot_cfg()
             },                                  
@@ -114,6 +114,17 @@ class HimGo2Env(ManagerBasedRlEnv):
         foot_geoms = tuple(
             f"{leg}_foot_collision"
             for leg in ("FR", "FL", "RR", "RL")
+        )
+
+        contact_geom_patterns = {
+            "base": r"^base[123]_collision$",
+            "thigh": r"^(FR|FL|RR|RL)_thigh_collision$",
+            "calf": r"^(FR|FL|RR|RL)_calf[12]_collision$",
+        }
+        penalize_contact_patterns = tuple(
+            contact_geom_patterns[part_name]
+            for part_name in self.cfg.asset.penalize_contacts_on
+            if part_name in contact_geom_patterns
         )
 
         sensors = []
@@ -163,7 +174,23 @@ class HimGo2Env(ManagerBasedRlEnv):
                 )
             )
 
-        
+        if self.cfg.rewards.scales.collision and penalize_contact_patterns:
+            sensors.append(
+                ContactSensorCfg(
+                    name = "nonfoot_ground_touch", 
+                    primary = ContactMatch(   
+                        mode = "geom",
+                        pattern = penalize_contact_patterns,
+                        entity = entity_name,
+                    )
+                    secondary = ContactMatch(
+                        mode = "body",
+                        pattern = "terrain",       
+                    ),
+
+                )
+            )
+
 
         return sensors
 
@@ -265,7 +292,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             )
         }
 
-    def _build_events(self, cfg, play):
+    def _build_events(self, play):
         """ 构建重置事件与域随机化
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/events.html
         """
