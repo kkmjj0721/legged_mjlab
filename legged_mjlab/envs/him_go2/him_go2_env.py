@@ -242,9 +242,11 @@ class HimGo2Env(ManagerBasedRlEnv):
         """
 
 
-    def _build_commands(self):
+    def _build_commands(self, cfg):
         """
+            官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/commands.html
         """
+        ranges = cfg.commands.ranges
 
     def _reward_scale(cfg, name):
         """ 返回指定奖励项的缩放系数，若不存在则返回 0
@@ -260,9 +262,9 @@ class HimGo2Env(ManagerBasedRlEnv):
             return
 
         terms[name] = RewardTermCfg(
-            func=func,
-            weight=weight,
-            params=dict(params or {}),
+            func = func,
+            weight = weight,
+            params = dict(params or {}),
         )
 
     def _entity_term_cfg(self, cfg):
@@ -302,7 +304,7 @@ class HimGo2Env(ManagerBasedRlEnv):
         """ 构建回合提前终止条件
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/terminations.html
         """
-        
+
         return {
             "time_out": TerminationTermCfg(
                 func=envs_mdp.time_out,
