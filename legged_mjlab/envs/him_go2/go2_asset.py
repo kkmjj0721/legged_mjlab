@@ -30,33 +30,6 @@ class Go2Asset:
         self._parse_cfg(self.cfg)
 
         self.entity = self.entitycfg(self)
-
-        # 从 MJCF 中读取真实 body 名称，排除 world body
-        spec = self.asset.entity.get_spec()
-        self.body_names = tuple(
-            body.name for body in spec.worldbody.find_all("body")
-        )
-
-        # 根据配置中的字符串筛选 body
-        self.penalized_contact_names = []
-        for name in self.asset.cfg.asset.penalize_contacts_on:
-            self.penalized_contact_names.extend(
-                [s for s in self.body_names if name in s]
-            )
-
-        self.termination_contact_names = []
-        for name in self.asset.cfg.asset.terminate_after_contacts_on:
-            self.termination_contact_names.extend(
-                [s for s in self.body_names if name in s]
-            )
-
-        self.penalized_contact_names = tuple(
-            dict.fromkeys(self.penalized_contact_names)
-        )
-        self.termination_contact_names = tuple(
-            dict.fromkeys(self.termination_contact_names)
-        )
-
         self.sensor_mgr = self.sensor(self)
 
     def _resolve_xml_path(self, raw_path: str) -> Path:
@@ -108,6 +81,32 @@ class Go2Asset:
             self.action_delay_min = 0
             self.action_delay_max = 0
             self.action_hold_prob = 0
+
+        # 从 MJCF 中读取真实 body 名称，排除 world body
+        spec = self.asset.entity.get_spec()
+        self.body_names = tuple(
+            body.name for body in spec.worldbody.find_all("body")
+        )
+
+        # 根据配置中的字符串筛选 body
+        self.penalized_contact_names = []
+        for name in self.asset.cfg.asset.penalize_contacts_on:
+            self.penalized_contact_names.extend(
+                [s for s in self.body_names if name in s]
+            )
+
+        self.termination_contact_names = []
+        for name in self.asset.cfg.asset.terminate_after_contacts_on:
+            self.termination_contact_names.extend(
+                [s for s in self.body_names if name in s]
+            )
+
+        self.penalized_contact_names = tuple(
+            dict.fromkeys(self.penalized_contact_names)
+        )
+        self.termination_contact_names = tuple(
+            dict.fromkeys(self.termination_contact_names)
+        )
 
     class entitycfg():
         def __init__(self, asset: "Go2Asset"):
@@ -176,25 +175,25 @@ class Go2Asset:
             )
 
             FULL_COLLISION = CollisionCfg(
-                geom_names_expr=(".*_collision",),
-                condim={foot_regex: 3, ".*_collision": 1},
-                priority={foot_regex: 1, ".*": 0},
-                friction={foot_regex: (static_friction,), ".*": (0.6,)},
-                solimp={foot_regex: (0.9, 0.95, 0.023), ".*": (0.9, 0.95, 0.001)},
-                contype=1,
-                conaffinity=0,
+                geom_names_expr = (".*_collision",),
+                condim = {foot_regex: 3, ".*_collision": 1},
+                priority = {foot_regex: 1, ".*": 0},
+                friction = {foot_regex: (static_friction,), ".*": (0.6,)},
+                solimp = {foot_regex: (0.9, 0.95, 0.023), ".*": (0.9, 0.95, 0.001)},
+                contype = 1,
+                conaffinity = 0,
             )
 
             ARTICULATION = EntityArticulationInfoCfg(
-                actuators=self.add_actuator_cfg(),
+                actuators = self.add_actuator_cfg(),
                 soft_joint_pos_limit_factor = self.asset.pos_limit
             )
 
             return EntityCfg(
-                init_state=INIT_STATE,
-                collisions=(FULL_COLLISION,),
-                spec_fn=self.get_spec,
-                articulation=ARTICULATION,
+                init_state = INIT_STATE,
+                collisions = (FULL_COLLISION,),
+                spec_fn = self.get_spec,
+                articulation = ARTICULATION,
               )
 
     class sensor:
@@ -204,20 +203,20 @@ class Go2Asset:
         def get_foot_contact_sensor(self, entity_name: str) -> ContactSensorCfg:
             """ 足端触地力与接触判定传感器。"""
             return ContactSensorCfg(
-                name="feet_ground_contact",                     # 传感器名称
-                primary=ContactMatch(
-                    mode="geom",
-                    pattern=r"^(FL|FR|RL|RR)_foot_collision$",
-                    entity=entity_name,
+                name = "feet_ground_contact",                     # 传感器名称
+                primary = ContactMatch(
+                    mode = "geom",
+                    pattern = r"^(FL|FR|RL|RR)_foot_collision$",
+                    entity = entity_name,
                 ),
-                secondary=ContactMatch(
-                    mode="body",
-                    pattern="terrain",
+                secondary = ContactMatch(
+                    mode = "body",
+                    pattern = "terrain",
                 ),
-                fields=("found", "force"),
-                reduce="netforce",
-                num_slots=1,
-                track_air_time=True,
+                fields = ("found", "force"),
+                reduce = "netforce",
+                num_slots = 1,
+                track_air_time = True,
             )
 
         def get_illegal_contact_sensor(self) -> ContactSensorCfg:
@@ -225,11 +224,11 @@ class Go2Asset:
             """
             return ContactSensorCfg(
                 name = "nonfoot_ground_touch",
-                prim_path=".*",
-                target_names_expr=(r"^(base[123]_collision|(FL|FR|RL|RR)_(thigh_collision|calf[12]_collision))$",),
-                match=ContactMatch.GEOM_NAME,
-                history_length=1,
-                force_threshold=getattr(
+                prim_path = ".*",
+                target_names_expr = (r"^(base[123]_collision|(FL|FR|RL|RR)_(thigh_collision|calf[12]_collision))$",),
+                match = ContactMatch.GEOM_NAME,
+                history_length = 1,
+                force_threshold = getattr(
                     getattr(self.asset.cfg, "terminations", None),
                     "illegal_contact_force",
                     1.0,
