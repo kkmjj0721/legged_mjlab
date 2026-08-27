@@ -236,21 +236,29 @@ class Go2Asset:
                 ),
             )
 
-        def get_height_scan_sensor(self, debug_vis: bool = False) -> RayCastSensorCfg:
+        def get_height_scan_sensor(self, entity_name: str, debug_vis: bool = False) -> RayCastSensorCfg:
             """ 基座底部高程图扫描传感器（17x11=187 网格点）
             """
+            x_points = tuple(self.asset.cfg.terrain.measured_points_x)
+            y_points = tuple(self.asset.cfg.terrain.measured_points_y)
+
             return RayCastSensorCfg(
                 name = "height_scan",
-                prim_path="base_link",
-                attach_to_frame=True,
-                pattern_cfg=GridPatternCfg(
-                    size=(1.6, 1.0),
-                    resolution=getattr(self.asset.cfg.terrain, "horizontal_scale", 0.1),
+                frame = ObjRef(                                     # 附加射线的实体
+                    type = "body",
+                    name = "base_link",          # 以 base_link 为基准坐标系向下发射射线
+                    entity = entity_name,
                 ),
-                ray_alignment="z_negative",
-                ray_length=2.0,
-                offset_pos=(0.0, 0.0, 0.5),
-                debug_vis=debug_vis,
+                pattern=GridPatternCfg(
+                    size = (
+                        max(x_points) - min(x_points),  # 网格长
+                        max(y_points) - min(y_points),  # 网格宽
+                    ),
+                    resolution = self.asset.cfg.terrain.horizontal_scale,  # 采样分辨率
+                ),
+                ray_alignment = "yaw",
+                max_distance = 2.0,              
+                debug_vis = bool(debug_vis),     # 是否在 GUI 中绘制扫描射线
             )
 
         def get_all_sensors(self, debug_vis: bool = False) -> Dict[str, Any]:
