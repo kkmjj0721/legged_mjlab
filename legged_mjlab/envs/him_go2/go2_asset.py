@@ -214,9 +214,10 @@ class Go2Asset:
             )
 
         def get_illegal_contact_sensor(self) -> ContactSensorCfg:
-            """ 机身/大腿/小腿非期望碰撞检测传感器。
+            """ 非期望碰撞检测传感器
             """
             return ContactSensorCfg(
+                name = "nonfoot_ground_touch",
                 prim_path=".*",
                 target_names_expr=(r"^(base[123]_collision|(FL|FR|RL|RR)_(thigh_collision|calf[12]_collision))$",),
                 match=ContactMatch.GEOM_NAME,
@@ -229,9 +230,10 @@ class Go2Asset:
             )
 
         def get_height_scan_sensor(self, debug_vis: bool = False) -> RayCastSensorCfg:
-            """基座底部高程图扫描传感器（17x11=187 网格点）。
+            """ 基座底部高程图扫描传感器（17x11=187 网格点）
             """
             return RayCastSensorCfg(
+                name = "height_scan",
                 prim_path="base_link",
                 attach_to_frame=True,
                 pattern_cfg=GridPatternCfg(
