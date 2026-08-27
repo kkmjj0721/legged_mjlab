@@ -201,16 +201,23 @@ class Go2Asset:
         def __init__(self, asset: "Go2Asset"):
             self.asset = asset
 
-        def get_foot_contact_sensor(self) -> ContactSensorCfg:
+        def get_foot_contact_sensor(self, entity_name: str) -> ContactSensorCfg:
             """ 足端触地力与接触判定传感器。"""
             return ContactSensorCfg(
                 name="feet_ground_contact",                     # 传感器名称
-                prim_path=".*",
-                target_names_expr=("^(FL|FR|RL|RR)_foot_collision$",),
-                match=ContactMatch.GEOM_NAME,
-                history_length=1,
+                primary=ContactMatch(
+                    mode="geom",
+                    pattern=r"^(FL|FR|RL|RR)_foot_collision$",
+                    entity=entity_name,
+                ),
+                secondary=ContactMatch(
+                    mode="body",
+                    pattern="terrain",
+                ),
+                fields=("found", "force"),
+                reduce="netforce",
+                num_slots=1,
                 track_air_time=True,
-                force_threshold=1.0,
             )
 
         def get_illegal_contact_sensor(self) -> ContactSensorCfg:
