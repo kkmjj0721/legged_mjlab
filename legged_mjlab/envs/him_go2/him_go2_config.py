@@ -144,7 +144,9 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
     
             # 电机零位误差
             randomize_motor_zero_offset = True
-            motor_zero_offset_range = [-0.035, 0.035]
+            motor_zero_pos_offset_range = [-0.035, 0.035]
+            motor_zero_vel_offset_range = [-0.01, 0.01]
+
     
             # 电机输出强度
             randomize_motor_strength = True
