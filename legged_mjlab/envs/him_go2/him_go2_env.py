@@ -322,9 +322,10 @@ class HimGo2Env(ManagerBasedRlEnv):
 
         all_body_cfg = SceneEntityCfg(entity_name, body_names=(".*",))
 
+        # 初始化基础事件字典（默认包含每次环境 reset 时的状态重置项）
         events = {
             "reset_base": EventTermCfg(
-                
+
             )
         }
 
