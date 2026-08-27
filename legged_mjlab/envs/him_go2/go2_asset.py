@@ -30,6 +30,13 @@ class Go2Asset:
         self._parse_cfg(self.cfg)
 
         self.entity = self.entitycfg(self)
+
+        # 从 MJCF 中读取真实 body 名称，排除 world body
+        spec = self.asset.entity.get_spec()
+        self.body_names = tuple(
+            body.name for body in spec.worldbody.find_all("body")
+        )
+
         self.sensor_mgr = self.sensor(self)
 
     def _resolve_xml_path(self, raw_path: str) -> Path:
