@@ -217,22 +217,31 @@ class Go2Asset:
                 reduce = "netforce",
                 num_slots = 1,
                 track_air_time = True,
+                history_length = self.asset.cfg.control.decimation
             )
 
-        def get_illegal_contact_sensor(self) -> ContactSensorCfg:
+        def get_illegal_contact_sensor(self, entity_name: str) -> ContactSensorCfg:
             """ 非期望碰撞检测传感器
             """
+            penalized_body_names = tuple(
+                self.asset.penalized_contact_names
+            )
+
             return ContactSensorCfg(
                 name = "nonfoot_ground_touch",
-                prim_path = ".*",
-                target_names_expr = (r"^(base[123]_collision|(FL|FR|RL|RR)_(thigh_collision|calf[12]_collision))$",),
-                match = ContactMatch.GEOM_NAME,
-                history_length = 1,
-                force_threshold = getattr(
-                    getattr(self.asset.cfg, "terminations", None),
-                    "illegal_contact_force",
-                    1.0,
+                primary = ContactMatch(
+                    mode = "body",
+                    pattern = penalized_body_names,
+                    entity = entity_name,
                 ),
+                secondary = ContactMatch(
+                    mode = "body",
+                    pattern = "terrain",
+                ),
+                fields = ("found", "force"),
+                reduce = "maxforce",
+                num_slots = 1,
+                history_length = self.asset.cfg.control.decimation,
             )
 
         def get_height_scan_sensor(self, entity_name: str, debug_vis: bool = False) -> RayCastSensorCfg:
@@ -258,6 +267,7 @@ class Go2Asset:
                 ray_alignment = "yaw",
                 max_distance = 2.0,              
                 debug_vis = bool(debug_vis),     # 是否在 GUI 中绘制扫描射线
+                history_length = self.asset.cfg.control.decimation
             )
 
         def get_all_sensors(self, debug_vis: bool = False) -> Dict[str, Any]:
