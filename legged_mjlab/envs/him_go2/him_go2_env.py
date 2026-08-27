@@ -128,23 +128,9 @@ class HimGo2Env(ManagerBasedRlEnv):
         # 高程图
         if self.robot_cfg.terrain.measure_heights:
             sensors.append(self.asset.sensor.get_height_scan_sensor(entity_name, debug_vis))
-        
-        if self.robot_cfg.rewards.scales.collision and penalize_contact_patterns:
-            sensors.append(
-                ContactSensorCfg(
-                    name = "nonfoot_ground_touch", 
-                    primary = ContactMatch(   
-                        mode = "geom",
-                        pattern = penalize_contact_patterns,
-                        entity = entity_name,
-                    ),
-                    secondary = ContactMatch(
-                        mode = "body",
-                        pattern = "terrain",       
-                    ),
 
-                )
-            )
+        if self.robot_cfg.rewards.scales.collision and penalize_contact_patterns:
+            sensors.append(self.asset.sensor.get_illegal_contact_sensor(entity_name))
 
         return sensors
 
