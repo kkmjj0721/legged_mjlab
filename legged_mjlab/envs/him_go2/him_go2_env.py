@@ -125,31 +125,10 @@ class HimGo2Env(ManagerBasedRlEnv):
         if self.robot_cfg.rewards.scales.feet_air_time:
             sensors.append(self.asset.sensor.get_foot_contact_sensor(entity_name))
 
+        # 高程图
         if self.robot_cfg.terrain.measure_heights:
-            x_points = tuple(self.robot_cfg.terrain.measured_points_x)
-            y_points = tuple(self.robot_cfg.terrain.measured_points_y)
-
-            sensors.append(
-                RayCastSensorCfg(
-                    name = "height_scan",
-                    frame = ObjRef(                                     # 附加射线的实体
-                        type = "body",
-                        name = "base_link",          # 以 base_link 为基准坐标系向下发射射线
-                        entity = entity_name,
-                    ),
-                    pattern=GridPatternCfg(
-                        size = (
-                            max(x_points) - min(x_points),  # 网格长
-                            max(y_points) - min(y_points),  # 网格宽
-                        ),
-                        resolution = self.robot_cfg.terrain.horizontal_scale,  # 采样分辨率
-                    ),
-                    ray_alignment = "yaw",
-                    max_distance = 2.0,              
-                    debug_vis = bool(debug_vis),     # 是否在 GUI 中绘制扫描射线
-                )
-            )
-
+            sensors.append(self.asset.sensor.get_height_scan_sensor(entity_name, debug_vis))
+        
         if self.robot_cfg.rewards.scales.collision and penalize_contact_patterns:
             sensors.append(
                 ContactSensorCfg(
