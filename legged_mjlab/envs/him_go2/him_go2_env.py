@@ -48,7 +48,7 @@ class HimGo2Env(ManagerBasedRlEnv):
         self.cfg = cfg
         self.play = bool(play)
 
-        self.managercfg = self._build_mjlab_managercfg(self.cfg, play = self.play, debug_vis = debug_vis)
+        self.managercfg = self._build_mjlab_managercfg(play = self.play, debug_vis = debug_vis)
 
         # 完成底层 MuJoCo 仿真器与各 Manager 的实例化
         super().__init__(
@@ -296,6 +296,7 @@ class HimGo2Env(ManagerBasedRlEnv):
         """ 构建重置事件与域随机化
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/events.html
         """
+        
 
     def _build_commands(self):
         """
