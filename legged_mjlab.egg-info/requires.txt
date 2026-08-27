@@ -1,3 +1,0 @@
-mjlab==1.6.0
-mujoco-warp==3.11.0
-scipy==1.17.0
