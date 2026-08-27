@@ -70,7 +70,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             observations = self._build_observations(),                      # 挂载观测管理器配置
             actions = self._build_actions(),                                # 挂载动作管理器配置
             events = self._build_events(),
-            seed = self.cfg.env.seed,                                            # 随机种子
+            seed = self.ronot_cfg.env.seed,                                            # 随机种子
             sim = SimulationCfg(                                            # 仿真引擎底层设置
                 mujoco = MujocoCfg(
                     timestep = self.ronot_cfg.sim.dt,          # 物理仿真步长
@@ -81,7 +81,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             episode_length_s = self.ronot_cfg.env.episode_length_s,         # 单回合最长时间
             rewards = ,
             terminations = self._build_terminations(),                      # 挂载终止条件管理器配置
-            commands = ,
+            commands = self._build_commands(),
             curriculum = self._build_curriculum(),
             metrics = , 
             recorders = ,
@@ -415,7 +415,7 @@ class HimGo2Env(ManagerBasedRlEnv):
         return events
 
 
-    def _build_commands(self):
+    def _build_commands(self, debug_vis):
         """
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/commands.html
         """
@@ -424,7 +424,16 @@ class HimGo2Env(ManagerBasedRlEnv):
         return {
             "twist": UniformVelocityCommandCfg(
                 entity_name = self.ronot_cfg.asset.name,
-                resampling_time_range = tuple(self.ronot_cfg.commands.resampling_time)
+                resampling_time_range = tuple(self.ronot_cfg.commands.resampling_time),
+                heading_command = self.ronot_cfg.commands.heading_command,
+                rel_standing_envs = 0.05,               # 保持静止环境的比例
+                rel_forward_envs = 0.25,                # 仅前向速度的比例
+                debug_vis = debug_vis,                  # 是否在仿真视口中渲染指令的箭头/可视化标记
+                ranges = UniformVelocityCommandCfg.Ranges(
+                    lin_vel_x = tuple(ranges.lin_vel_x),
+                    lin_vel_y = tuple(ranges.lin_vel_y),
+                    ang_vel_z = tuple(ranges.heading),
+                )
             )
         }
 
