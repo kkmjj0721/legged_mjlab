@@ -37,6 +37,26 @@ class Go2Asset:
             body.name for body in spec.worldbody.find_all("body")
         )
 
+        # 根据配置中的字符串筛选 body
+        self.penalized_contact_names = []
+        for name in self.asset.cfg.asset.penalize_contacts_on:
+            self.penalized_contact_names.extend(
+                [s for s in self.body_names if name in s]
+            )
+
+        self.termination_contact_names = []
+        for name in self.asset.cfg.asset.terminate_after_contacts_on:
+            self.termination_contact_names.extend(
+                [s for s in self.body_names if name in s]
+            )
+
+        self.penalized_contact_names = tuple(
+            dict.fromkeys(self.penalized_contact_names)
+        )
+        self.termination_contact_names = tuple(
+            dict.fromkeys(self.termination_contact_names)
+        )
+
         self.sensor_mgr = self.sensor(self)
 
     def _resolve_xml_path(self, raw_path: str) -> Path:
