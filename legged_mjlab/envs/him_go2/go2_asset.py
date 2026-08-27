@@ -204,6 +204,7 @@ class Go2Asset:
         def get_foot_contact_sensor(self) -> ContactSensorCfg:
             """ 足端触地力与接触判定传感器。"""
             return ContactSensorCfg(
+                name="feet_ground_contact",                     # 传感器名称
                 prim_path=".*",
                 target_names_expr=("^(FL|FR|RL|RR)_foot_collision$",),
                 match=ContactMatch.GEOM_NAME,
@@ -220,7 +221,6 @@ class Go2Asset:
                 target_names_expr=(r"^(base[123]_collision|(FL|FR|RL|RR)_(thigh_collision|calf[12]_collision))$",),
                 match=ContactMatch.GEOM_NAME,
                 history_length=1,
-                track_air_time=False,
                 force_threshold=getattr(
                     getattr(self.asset.cfg, "terminations", None),
                     "illegal_contact_force",
