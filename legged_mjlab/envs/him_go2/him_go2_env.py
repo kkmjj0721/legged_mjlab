@@ -31,7 +31,7 @@ from mjlab.sensor import (
 from mjlab.terrains import TerrainEntityCfg
 from mjlab.terrains.terrain_generator import TerrainGeneratorCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
-
+from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from legged_mjlab.envs.him_go2.go2_asset import Go2Asset
 from legged_mjlab.envs.him_go2.him_go2_config import HimGo2RoughCfg
 
@@ -46,7 +46,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             sim_device: 模拟设备（如 CPU 或 GPU）
             render_mode: 渲染模式（如 "human" 或 "rgb_array"）
         """
-        self.cfg = cfg
+        self.ronot_cfg = cfg
         self.play = bool(play)
 
         self.managercfg = self._build_mjlab_managercfg(play = self.play, debug_vis = debug_vis)
@@ -73,12 +73,12 @@ class HimGo2Env(ManagerBasedRlEnv):
             seed = self.cfg.env.seed,                                            # 随机种子
             sim = SimulationCfg(                                            # 仿真引擎底层设置
                 mujoco = MujocoCfg(
-                    timestep = self.cfg.sim.dt,          # 物理仿真步长
-                    integrator = self.cfg.sim.gravity,   # 重力向量
+                    timestep = self.ronot_cfg.sim.dt,          # 物理仿真步长
+                    integrator = self.ronot_cfg.sim.gravity,   # 重力向量
                 )
             ),                                             
             viewer = ,
-            episode_length_s = self.cfg.env.episode_length_s,               # 单回合最长时间
+            episode_length_s = self.ronot_cfg.env.episode_length_s,         # 单回合最长时间
             rewards = ,
             terminations = self._build_terminations(),                      # 挂载终止条件管理器配置
             commands = ,
@@ -93,11 +93,11 @@ class HimGo2Env(ManagerBasedRlEnv):
         """ 构建场景对象，包含地形和机器人实体
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/scene.html
         """
-        entity_name = self.cfg.asset.name
+        entity_name = self.ronot_cfg.asset.name
 
         return SceneCfg(
-            num_envs = self.cfg.env.num_envs,                                           # 环境数
-            env_spacing = self.cfg.env.env_spacing,                                     # 并行环境间的网格间距
+            num_envs = self.ronot_cfg.env.num_envs,                                           # 环境数
+            env_spacing = self.ronot_cfg.env.env_spacing,                                     # 并行环境间的网格间距
             terrain = self._build_terrain(),                                            # 挂载地形实体
             entities = {                                                                # 挂载机器人的 MJCF 实体配置
                 entity_name: asset.entity.get_robot_cfg()
@@ -130,7 +130,7 @@ class HimGo2Env(ManagerBasedRlEnv):
 
         sensors = []
 
-        if self.cfg.rewards.scales.feet_air_time:
+        if self.ronot_cfg.rewards.scales.feet_air_time:
             sensors.append(
                 ContactSensorCfg(
                     name="feet_ground_contact",                     # 传感器名称
@@ -150,9 +150,9 @@ class HimGo2Env(ManagerBasedRlEnv):
                 )
             )
 
-        if self.cfg.terrain.measure_heights:
-            x_points = tuple(self.cfg.terrain.measured_points_x)
-            y_points = tuple(self.cfg.terrain.measured_points_y)
+        if self.ronot_cfg.terrain.measure_heights:
+            x_points = tuple(self.ronot_cfg.terrain.measured_points_x)
+            y_points = tuple(self.ronot_cfg.terrain.measured_points_y)
 
             sensors.append(
                 RayCastSensorCfg(
@@ -167,7 +167,7 @@ class HimGo2Env(ManagerBasedRlEnv):
                             max(x_points) - min(x_points),  # 网格长
                             max(y_points) - min(y_points),  # 网格宽
                         ),
-                        resolution = self.cfg.terrain.horizontal_scale,  # 采样分辨率
+                        resolution = self.ronot_cfg.terrain.horizontal_scale,  # 采样分辨率
                     ),
                     ray_alignment = "yaw",
                     max_distance = 2.0,              
@@ -175,7 +175,7 @@ class HimGo2Env(ManagerBasedRlEnv):
                 )
             )
 
-        if self.cfg.rewards.scales.collision and penalize_contact_patterns:
+        if self.ronot_cfg.rewards.scales.collision and penalize_contact_patterns:
             sensors.append(
                 ContactSensorCfg(
                     name = "nonfoot_ground_touch", 
@@ -200,7 +200,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/terrain.html
         """
         # plane
-        if self.cfg.terrain.mesh_type == "plane":
+        if self.ronot_cfg.terrain.mesh_type == "plane":
             return TerrainEntityCfg(
                 terrain_type="plane",
                 terrain_generator=None,
@@ -208,15 +208,15 @@ class HimGo2Env(ManagerBasedRlEnv):
             )
 
         # terrain
-        if self.cfg.terrain.mesh_type == "generator":
+        if self.ronot_cfg.terrain.mesh_type == "generator":
             return TerrainEntityCfg(
                 terrain_type = "generator",
                 terrain_generator = TerrainGeneratorCfg(
                     curriculum = True,
-                    size = (self.cfg.terrain.terrain_length, self.cfg.terrain.terrain_width),            # 子地形大小
-                    num_rows = self.cfg.terrain.num_rows,                                                # 地形行数（难度等级）
-                    num_cols = self.cfg.terrain.num_cols,                                                # 地形列数（地形类型）
-                    border_width = self.cfg.terrain.border_size,                                         # 边界宽度
+                    size = (self.ronot_cfg.terrain.terrain_length, self.ronot_cfg.terrain.terrain_width),            # 子地形大小
+                    num_rows = self.ronot_cfg.terrain.num_rows,                                                # 地形行数（难度等级）
+                    num_cols = self.ronot_cfg.terrain.num_cols,                                                # 地形列数（地形类型）
+                    border_width = self.ronot_cfg.terrain.border_size,                                         # 边界宽度
                     sub_terrains = {
                         # 1. 平坦地面类型
                         "flat": terrain_gen.BoxFlatTerrainCfg(
@@ -261,7 +261,7 @@ class HimGo2Env(ManagerBasedRlEnv):
     def _joint_names(self):
         """ 从默认关节角字典中提取全部关节名元组，保持严格的顺序
         """
-        return tuple(self.cfg.init_state.default_joint_angles.keys())
+        return tuple(self.ronot_cfg.init_state.default_joint_angles.keys())
 
     def _build_actions(self):
         """ 构建关节位置动作空间：输出值经 action_scale 缩放后，加到 default 关节偏置上，这里的 offset 为静态偏置
@@ -272,11 +272,11 @@ class HimGo2Env(ManagerBasedRlEnv):
         action_scales = {}
         for name in joint_names:
             if "hip" in name:
-                action_scales[name] = float(self.cfg.control.action_scale * self.cfg.control.hip_scale_reduction)
+                action_scales[name] = float(self.ronot_cfg.control.action_scale * self.ronot_cfg.control.hip_scale_reduction)
             else:
-                action_scales[name] = float(self.cfg.control.action_scale)
+                action_scales[name] = float(self.ronot_cfg.control.action_scale)
 
-        clip_val = self.cfg.control.action_clip
+        clip_val = self.ronot_cfg.control.action_clip
         if isinstance(clip_val, (int, float)):
             action_clip = (-float(clip_val), float(clip_val))
         else:
@@ -284,7 +284,7 @@ class HimGo2Env(ManagerBasedRlEnv):
 
         return {
             "joint_position": JointPositionActionCfg(
-                entity_name = self.cfg.asset.name,
+                entity_name = self.ronot_cfg.asset.name,
                 actuator_name = joint_names,
                 scale = action_scales,    
                 use_default_offset = True,                  # 使用位置增量
@@ -297,11 +297,11 @@ class HimGo2Env(ManagerBasedRlEnv):
         """ 构建重置事件与域随机化
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/events.html
         """
-        entity_name = self.cfg.asset.name
+        entity_name = self.ronot_cfg.asset.name
 
         joint_cfg = SceneEntityCfg(
             entity_name,
-            joint_names=self._joint_names(self.cfg),
+            joint_names=self._joint_names(),
             preserve_order=True,
         )
 
@@ -348,32 +348,32 @@ class HimGo2Env(ManagerBasedRlEnv):
         }
 
         # 域随机化部分
-        if self.cfg.domain_rand.randomize_payload_mass:
+        if self.ronot_cfg.domain_rand.randomize_payload_mass:
             pass
 
-        if self.cfg.domain_rand.randomize_motor_zero_offset:
+        if self.ronot_cfg.domain_rand.randomize_motor_zero_offset:
             events["encoder_bias"] = EventTermCfg(
                 mode="startup",
                 func=dr.encoder_bias,
                 params={
                     "asset_cfg": joint_cfg,
-                    "bias_range": tuple(self.cfg.domain_rand.motor_zero_offset_range),
+                    "bias_range": tuple(self.ronot_cfg.domain_rand.motor_zero_offset_range),
                 },
             )
 
-        if self.cfg.domain_rand.randomize_pd_gains:
+        if self.ronot_cfg.domain_rand.randomize_pd_gains:
             events["pd_gains"] = EventTermCfg(
                 func = dr.pd_gains,
                 mode = "startup",
                 params = {
                     "asset_cfg": actuator_cfg,
                     "operation": "scale",          # 在标称增益上乘比例系数
-                    "kp_range": tuple(self.cfg.domain_rand.stiffness_multiplier_range),
-                    "kd_range": tuple(self.cfg.domain_rand.damping_multiplier_range),
+                    "kp_range": tuple(self.ronot_cfg.domain_rand.stiffness_multiplier_range),
+                    "kd_range": tuple(self.ronot_cfg.domain_rand.damping_multiplier_range),
                 }
             )
 
-        if self.cfg.domain_rand.randomize_com_displacement:
+        if self.ronot_cfg.domain_rand.randomize_com_displacement:
             events["base_com"] = EventTermCfg(
                 mode="startup",
                 func=dr.body_com_offset,
@@ -381,32 +381,32 @@ class HimGo2Env(ManagerBasedRlEnv):
                     "asset_cfg": body_cfg,
                     "operation": "add",                     # 在默认质心坐标上累加偏移量
                     "ranges": {
-                        0: tuple(self.cfg.domain_rand.com_displacement_range), # X 轴偏移范围
-                        1: tuple(self.cfg.domain_rand.com_displacement_range), # Y 轴偏移范围
-                        2: tuple(self.cfg.domain_rand.com_displacement_range), # Z 轴偏移范围
+                        0: tuple(self.ronot_cfg.domain_rand.com_displacement_range), # X 轴偏移范围
+                        1: tuple(self.ronot_cfg.domain_rand.com_displacement_range), # Y 轴偏移范围
+                        2: tuple(self.ronot_cfg.domain_rand.com_displacement_range), # Z 轴偏移范围
                     },
                 },
             )
 
-        if self.cfg.domain_rand.randomize_joint_friction:
+        if self.ronot_cfg.domain_rand.randomize_joint_friction:
             events["joint_friction"] = EventTermCfg(
                 mode="startup",
                 func=dr.joint_friction,
                 params={
                     "asset_cfg": joint_cfg,
                     "operation": "abs",
-                    "ranges": tuple(self.cfg.domain_rand.joint_friction_range),
+                    "ranges": tuple(self.ronot_cfg.domain_rand.joint_friction_range),
                 },
             )
 
-        if self.cfg.domain_rand.randomize_joint_damping:
+        if self.ronot_cfg.domain_rand.randomize_joint_damping:
             events["joint_damping"] = EventTermCfg(
                 mode="startup",
                 func=dr.joint_damping,
                 params={
                     "asset_cfg": joint_cfg,
                     "operation": "abs",
-                    "ranges": tuple(self.cfg.domain_rand.joint_damping_range),
+                    "ranges": tuple(self.ronot_cfg.domain_rand.joint_damping_range),
                 },
             )
 
@@ -419,17 +419,24 @@ class HimGo2Env(ManagerBasedRlEnv):
         """
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/commands.html
         """
-        ranges = self.cfg.commands.ranges
+        ranges = self.ronot_cfg.commands.ranges
+
+        return {
+            "twist": UniformVelocityCommandCfg(
+                entity_name = self.ronot_cfg.asset.name,
+                resampling_time_range = tuple(self.ronot_cfg.commands.resampling_time)
+            )
+        }
 
     def _reward_scale(self, name):
         """ 返回指定奖励项的缩放系数，若不存在则返回 0
         """
-        return self.cfg.rewards.scales.get(name, 0.0)
+        return self.ronot_cfg.rewards.scales.get(name, 0.0)
 
     def _add_reward(self, terms, name, func, params=None):
         """ 通用奖励项注册辅助函数：仅当权重非零时才加入计算图
         """
-        weight = self._reward_scale(self.cfg, name)
+        weight = self._reward_scale(name)
 
         if weight == 0.0:
             return
@@ -454,7 +461,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/rewards.html
         """
 
-        robot_cfg = SceneEntityCfg(name = self.cfg.asset.name)
+        robot_cfg = SceneEntityCfg(name = self.ronot_cfg.asset.name)
         joint_cfg = self._entity_term_cfg()
         terms = {}
 
@@ -490,7 +497,7 @@ class HimGo2Env(ManagerBasedRlEnv):
                 func = envs_mdp.builtin_sensor,
                 params = {"sensor_name": f"{entity_name}/imu_ang_vel"},
                 noise = noise.get("ang_vel"),
-                scale = float(self.cfg.normalization.obs_scales.ang_vel),
+                scale = float(self.ronot_cfg.normalization.obs_scales.ang_vel),
 
             ),
 
@@ -518,19 +525,19 @@ class HimGo2Env(ManagerBasedRlEnv):
         if play:
             return curriculums
 
-        if self.cfg.terrain.curriculum:
+        if self.ronot_cfg.terrain.curriculum:
             curriculums["terrain_levels"] = CurriculumTermCfg(
                 func=mdp.terrain_levels_vel,
                 params={"command_name": "twist"},
             )
 
-        if self.cfg.commands.curriculum:
+        if self.ronot_cfg.commands.curriculum:
             curriculums["commands_levels"] = CurriculumTermCfg(
                 func = mdp.commands_vel,
                 params={
                     "command_name": "twist",
-                    "max_lin_vel_x": self.cfg.commands.max_curriculum,
-                    "max_ang_vel_yaw": self.cfg.commands.max_curriculum,
+                    "max_lin_vel_x": self.ronot_cfg.commands.max_curriculum,
+                    "max_ang_vel_yaw": self.ronot_cfg.commands.max_curriculum,
                 },
             )
 
