@@ -7,6 +7,7 @@ from mjlab.entity import Entity
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.envs import mdp as envs_mdp
 from mjlab.tasks.velocity import mdp
+from mjlab.envs.mdp import dr
 import mjlab.terrains as terrain_gen
 from mjlab.utils.lab_api.math import quat_apply_inverse
 
@@ -323,7 +324,7 @@ class HimGo2Env(ManagerBasedRlEnv):
         all_body_cfg = SceneEntityCfg(entity_name, body_names=(".*",))
 
         base_pose = {}
-        
+
 
 
         joint_offset = {}
@@ -361,7 +362,23 @@ class HimGo2Env(ManagerBasedRlEnv):
             ),
         }
 
+        # 域随机化部分
+        if self.cfg.domain_rand.randomize_payload_mass:
+            pass
 
+        if self.cfg.domain_rand.randomize_pd_gains:
+            events["pd_gains"] = EventTermCfg(
+                func = dr.pd_gains,
+                mode = "startup",
+                params = {
+                    "asset_cfg": actuator_cfg,
+                    "operation": "scale",          # 在标称增益上乘比例系数
+                    "kp_range": tuple(self.cfg.domain_rand.stiffness_multiplier_range),
+                    "kd_range": tuple(self.cfg.domain_rand.damping_multiplier_range),
+                }
+            )
+
+        
 
 
 
