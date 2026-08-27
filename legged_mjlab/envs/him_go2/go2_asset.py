@@ -71,6 +71,8 @@ class Go2Asset:
         self.vel_limit = self.cfg.rewards.soft_dof_vel_limit
         self.pos_limit = self.cfg.rewards.soft_dof_pos_limit
 
+        self.joint_names = tuple(self.robot_cfg.init_state.default_joint_angles.keys())
+
         if self.cfg.domain_rand.randomize_cmd_action_latency:
             self.action_delay = self.cfg.domain_rand.range_cmd_action_latency
             self.action_delay_min = self.action_delay[0]
@@ -223,9 +225,7 @@ class Go2Asset:
         def get_illegal_contact_sensor(self, entity_name: str) -> ContactSensorCfg:
             """ 非期望碰撞检测传感器
             """
-            penalized_body_names = tuple(
-                self.asset.penalized_contact_names
-            )
+            penalized_body_names = tuple(self.asset.penalized_contact_names)
 
             return ContactSensorCfg(
                 name = "nonfoot_ground_touch",
@@ -242,6 +242,15 @@ class Go2Asset:
                 reduce = "maxforce",
                 num_slots = 1,
                 history_length = self.asset.cfg.control.decimation,
+            )
+
+        def get_termination_contact_sensor(self, entity_name: str) -> ContactSensorCfg:
+            """ 碰撞终止传感器
+            """
+            termination_body_names = tuple(self.asset.termination_contact_names)
+
+            return ContactSensorCfg(
+
             )
 
         def get_height_scan_sensor(self, entity_name: str, debug_vis: bool = False) -> RayCastSensorCfg:

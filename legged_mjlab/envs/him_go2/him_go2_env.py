@@ -63,7 +63,7 @@ class HimGo2Env(ManagerBasedRlEnv):
         """ 将 HimGo2RoughCfg 转换为 ManagerBasedRlEnvCfg 以便于使用 mjlab 的管理器进行环境管理。
         """
         return ManagerBasedRlEnvCfg(
-            decimation = self.cfg.control.decimation,                       # 控制步
+            decimation = self.robot_cfg.control.decimation,                 # 控制步
             scene = self._build_scene(self.asset, play, debug_vis),         # 构建场景（包含实体、传感器、地形）
             observations = self._build_observations(),                      # 挂载观测管理器配置
             actions = self._build_actions(),                                # 挂载动作管理器配置
@@ -80,7 +80,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             terminations = self._build_terminations(),                      # 挂载终止条件管理器配置
             commands = self._build_commands(),
             curriculum = self._build_curriculum(),
-            # recorders = ,
+            recorders = ,
             scale_rewards_by_dt = False,
         )
 
@@ -106,19 +106,6 @@ class HimGo2Env(ManagerBasedRlEnv):
         """ 构建
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/sensors/index.html
         """
-        # 定义四条腿足端碰撞体的名字元组
-
-        contact_geom_patterns = {
-            "base": r"^base[123]_collision$",
-            "thigh": r"^(FR|FL|RR|RL)_thigh_collision$",
-            "calf": r"^(FR|FL|RR|RL)_calf[12]_collision$",
-        }
-        penalize_contact_patterns = tuple(
-            contact_geom_patterns[part_name]
-            for part_name in self.robot_cfg.asset.penalize_contacts_on
-            if part_name in contact_geom_patterns
-        )
-
         sensors = []
 
         # 足端触地浮空
@@ -129,7 +116,8 @@ class HimGo2Env(ManagerBasedRlEnv):
         if self.robot_cfg.terrain.measure_heights:
             sensors.append(self.asset.sensor.get_height_scan_sensor(entity_name, debug_vis))
 
-        if self.robot_cfg.rewards.scales.collision and penalize_contact_patterns:
+        # 
+        if self.robot_cfg.rewards.scales.collision and self.asset.penalized_contact_names:
             sensors.append(self.asset.sensor.get_illegal_contact_sensor(entity_name))
 
         return sensors
@@ -197,19 +185,12 @@ class HimGo2Env(ManagerBasedRlEnv):
                 max_init_terrain_level = 5
             )
         
-    def _joint_names(self):
-        """ 从默认关节角字典中提取全部关节名元组，保持严格的顺序
-        """
-        return tuple(self.robot_cfg.init_state.default_joint_angles.keys())
-
     def _build_actions(self):
         """ 构建关节位置动作空间：输出值经 action_scale 缩放后，加到 default 关节偏置上，这里的 offset 为静态偏置
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/actions.html
         """
-        joint_names = self._joint_names()
-
         action_scales = {}
-        for name in joint_names:
+        for name in self.asset.joint_names:
             if "hip" in name:
                 action_scales[name] = float(self.robot_cfg.control.action_scale * self.robot_cfg.control.hip_scale_reduction)
             else:
@@ -224,7 +205,7 @@ class HimGo2Env(ManagerBasedRlEnv):
         return {
             "joint_position": JointPositionActionCfg(
                 entity_name = self.robot_cfg.asset.name,
-                actuator_name = joint_names,
+                actuator_name = self.asset.joint_names,
                 scale = action_scales,    
                 use_default_offset = True,                  # 使用位置增量
                 preserve_order = True,                      # 严格保持关节顺序与 policy 输出对齐
@@ -240,14 +221,14 @@ class HimGo2Env(ManagerBasedRlEnv):
 
         joint_cfg = SceneEntityCfg(
             entity_name,
-            joint_names=self._joint_names(),
-            preserve_order=True,
+            joint_names = self.asset.joint_names,
+            preserve_order = True,
         )
 
         actuator_cfg = SceneEntityCfg(
             entity_name,
-            actuator_names=(".*",),
-            preserve_order=True,
+            actuator_names = (".*",),
+            preserve_order = True,
         )
 
         foot_cfg = SceneEntityCfg(
@@ -422,7 +403,7 @@ class HimGo2Env(ManagerBasedRlEnv):
 
         joint_cfg = SceneEntityCfg(
             entity_name,
-            joint_names = self._joint_names(),
+            joint_names = self.asset.joint_names,
             preserve_order = True,
         )
 
