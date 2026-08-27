@@ -322,8 +322,12 @@ class HimGo2Env(ManagerBasedRlEnv):
 
         all_body_cfg = SceneEntityCfg(entity_name, body_names=(".*",))
 
+        base_pose = {}
+        
+
+
         joint_offset = {}
-        if self.cfg.domain_rand.randomize_motor_zero_offset:
+        if self.cfg.domain_rand.randomize_motor_zero_offset and not play:
             joint_offset = {
                 "position_range" : (self.cfg.domain_rand.motor_zero_pos_offset_range[0], self.cfg.domain_rand.motor_zero_pos_offset_range[1]),
                 "velocity_range" : (self.cfg.domain_rand.motor_zero_vel_offset_range[0], self.cfg.domain_rand.motor_zero_vel_offset_range[1])
