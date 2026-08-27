@@ -68,7 +68,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             scene = self._build_scene(asset, play, debug_vis),              # 构建场景（包含实体、传感器、地形）
             observations = self._build_observations(),                      # 挂载观测管理器配置
             actions = self._build_actions(),                                # 挂载动作管理器配置
-            events = ,
+            events = self._build_events(),
             seed = self.cfg.env.seed,                                            # 随机种子
             sim = SimulationCfg(                                            # 仿真引擎底层设置
                 mujoco = MujocoCfg(
@@ -263,7 +263,7 @@ class HimGo2Env(ManagerBasedRlEnv):
         return tuple(self.cfg.init_state.default_joint_angles.keys())
 
     def _build_actions(self):
-        """ 构建关节位置动作空间：输出值经 action_scale 缩放后，加到 default 关节偏置上
+        """ 构建关节位置动作空间：输出值经 action_scale 缩放后，加到 default 关节偏置上，这里的 offset 为静态偏置
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/actions.html
         """
         joint_names = self._joint_names()
@@ -296,7 +296,38 @@ class HimGo2Env(ManagerBasedRlEnv):
         """ 构建重置事件与域随机化
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/events.html
         """
+        entity_name = self.cfg.asset.name
+
+        joint_cfg = SceneEntityCfg(
+            entity_name,
+            joint_names=self._joint_names(self.cfg),
+            preserve_order=True,
+        )
+
+        actuator_cfg = SceneEntityCfg(
+            entity_name,
+            actuator_names=(".*",),
+            preserve_order=True,
+        )
+
+        foot_cfg = SceneEntityCfg(
+            entity_name,
+            geom_names=tuple(
+                f"{leg}_foot_collision" for leg in ("FL", "FR", "RL", "RR")
+            ),
+            preserve_order=True,
+        )
         
+        body_cfg = SceneEntityCfg(entity_name, body_names=("base_link",))
+
+        all_body_cfg = SceneEntityCfg(entity_name, body_names=(".*",))
+
+        events = {
+            "reset_base": EventTermCfg(
+                
+            )
+        }
+
 
     def _build_commands(self):
         """
