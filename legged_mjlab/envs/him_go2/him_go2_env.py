@@ -378,6 +378,29 @@ class HimGo2Env(ManagerBasedRlEnv):
                 },
             )
 
+        if self.cfg.domain_rand.randomize_joint_friction:
+            events["joint_friction"] = EventTermCfg(
+                mode="startup",
+                func=dr.joint_friction,
+                params={
+                    "asset_cfg": joint_cfg,
+                    "operation": "abs",
+                    "ranges": tuple(self.cfg.domain_rand.joint_friction_range),
+                },
+            )
+
+        if self.cfg.domain_rand.randomize_joint_damping:
+            events["joint_damping"] = EventTermCfg(
+                mode="startup",
+                func=dr.joint_damping,
+                params={
+                    "asset_cfg": joint_cfg,
+                    "operation": "abs",
+                    "ranges": tuple(self.cfg.domain_rand.joint_damping_range),
+                },
+            )
+
+        
 
 
     def _build_commands(self):
