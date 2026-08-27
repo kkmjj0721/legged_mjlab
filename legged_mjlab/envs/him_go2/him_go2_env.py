@@ -351,6 +351,16 @@ class HimGo2Env(ManagerBasedRlEnv):
         if self.cfg.domain_rand.randomize_payload_mass:
             pass
 
+        if self.cfg.domain_rand.randomize_motor_zero_offset:
+            events["encoder_bias"] = EventTermCfg(
+                mode="startup",
+                func=dr.encoder_bias,
+                params={
+                    "asset_cfg": joint_cfg,
+                    "bias_range": tuple(self.cfg.domain_rand.motor_zero_offset_range),
+                },
+            )
+
         if self.cfg.domain_rand.randomize_pd_gains:
             events["pd_gains"] = EventTermCfg(
                 func = dr.pd_gains,
@@ -400,7 +410,9 @@ class HimGo2Env(ManagerBasedRlEnv):
                 },
             )
 
-        
+
+
+        return events
 
 
     def _build_commands(self):
