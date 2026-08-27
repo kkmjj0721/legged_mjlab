@@ -182,7 +182,7 @@ class HimGo2Env(ManagerBasedRlEnv):
                         mode = "geom",
                         pattern = penalize_contact_patterns,
                         entity = entity_name,
-                    )
+                    ),
                     secondary = ContactMatch(
                         mode = "body",
                         pattern = "terrain",       
