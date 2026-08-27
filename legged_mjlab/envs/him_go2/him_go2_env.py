@@ -324,10 +324,26 @@ class HimGo2Env(ManagerBasedRlEnv):
 
         # 初始化基础事件字典（默认包含每次环境 reset 时的状态重置项）
         events = {
+            # 重置基座/机身状态
             "reset_base": EventTermCfg(
+                func = mdp.reset_root_state_uniform,
+                mode = "reset",                       # 触发时机：每次环境重置时
+                params = {
 
-            )
+                }
+            ),
+            # 重置各关节状态
+            "reset_joints": EventTermCfg(
+                func = mdp.reset_joints_by_offset,
+                mode = "reset",
+                params = {
+
+                }
+            ) 
         }
+
+
+
 
 
     def _build_commands(self):
