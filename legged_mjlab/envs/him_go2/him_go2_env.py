@@ -107,10 +107,6 @@ class HimGo2Env(ManagerBasedRlEnv):
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/sensors/index.html
         """
         # 定义四条腿足端碰撞体的名字元组
-        foot_geoms = tuple(
-            f"{leg}_foot_collision"
-            for leg in ("FR", "FL", "RR", "RL")
-        )
 
         contact_geom_patterns = {
             "base": r"^base[123]_collision$",
@@ -125,26 +121,9 @@ class HimGo2Env(ManagerBasedRlEnv):
 
         sensors = []
 
-        # 足端触笔浮空
+        # 足端触地浮空
         if self.robot_cfg.rewards.scales.feet_air_time:
-            sensors.append(
-                ContactSensorCfg(
-                    name="feet_ground_contact",                     # 传感器名称
-                    primary = ContactMatch(                         
-                        mode = "geom",                  # 匹配类型
-                        pattern = foot_geoms,           # 匹配四个足端 Geom
-                        entity = entity_name,
-                    ),
-                    secondary = ContactMatch(
-                        mode = "body",
-                        pattern = "terrain",            # 碰撞目标必须是地形
-                    ),
-                    fields = ("found", "force"),                    # 提取是否发生碰撞及碰撞力大小
-                    reduce = "netforce",                            # 对接触力进行合力计算
-                    num_slots = 1,                                  # 槽位数
-                    track_air_time = True,                          # 开启滞空时间跟踪
-                )
-            )
+            sensors.append(self.asset.sensor.get_foot_contact_sensor(entity_name))
 
         if self.robot_cfg.terrain.measure_heights:
             x_points = tuple(self.robot_cfg.terrain.measured_points_x)
