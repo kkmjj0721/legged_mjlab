@@ -165,6 +165,9 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
             range_cmd_action_latency = [1, 4]
             action_hold_prob = 0.3
 
+            # ---------------------------------- 初始化姿态随机化 --------------------------------- #
+            # 初始
+
 
     class rewards( LeggedMjlabCfg.rewards ):
         class scales:
