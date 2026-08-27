@@ -47,6 +47,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             render_mode: 渲染模式（如 "human" 或 "rgb_array"）
         """
         self.robot_cfg = cfg
+        self.asset = Go2Asset(self.robot_cfg)
         self.play = bool(play)
 
         self.managercfg = self._build_mjlab_managercfg(play = self.play, debug_vis = debug_vis)
@@ -61,11 +62,9 @@ class HimGo2Env(ManagerBasedRlEnv):
     def _build_mjlab_managercfg(self, play=False, debug_vis = False) -> ManagerBasedRlEnvCfg:
         """ 将 HimGo2RoughCfg 转换为 ManagerBasedRlEnvCfg 以便于使用 mjlab 的管理器进行环境管理。
         """
-        asset = Go2Asset(self.cfg)
-
         return ManagerBasedRlEnvCfg(
             decimation = self.cfg.control.decimation,                       # 控制步
-            scene = self._build_scene(asset, play, debug_vis),              # 构建场景（包含实体、传感器、地形）
+            scene = self._build_scene(self.asset, play, debug_vis),         # 构建场景（包含实体、传感器、地形）
             observations = self._build_observations(),                      # 挂载观测管理器配置
             actions = self._build_actions(),                                # 挂载动作管理器配置
             events = self._build_events(),                                  # 挂载事件管理器配置（reset, domain_rand）
@@ -120,7 +119,7 @@ class HimGo2Env(ManagerBasedRlEnv):
         }
         penalize_contact_patterns = tuple(
             contact_geom_patterns[part_name]
-            for part_name in self.cfg.asset.penalize_contacts_on
+            for part_name in self.robot_cfg.asset.penalize_contacts_on
             if part_name in contact_geom_patterns
         )
 
