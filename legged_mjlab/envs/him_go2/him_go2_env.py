@@ -325,21 +325,6 @@ class HimGo2Env(ManagerBasedRlEnv):
 
         base_pose = {}
 
-
-
-        joint_offset = {}
-        if self.cfg.domain_rand.randomize_motor_zero_offset and not play:
-            joint_offset = {
-                "position_range" : (self.cfg.domain_rand.motor_zero_pos_offset_range[0], self.cfg.domain_rand.motor_zero_pos_offset_range[1]),
-                "velocity_range" : (self.cfg.domain_rand.motor_zero_vel_offset_range[0], self.cfg.domain_rand.motor_zero_vel_offset_range[1])
-            }
-        else:
-            joint_offset = {
-                "position_range" : (-0.0, 0.0),
-                "velocity_range" : (-0.0, 0.0)
-            }
-
-
         # 初始化基础事件字典（默认包含每次环境 reset 时的状态重置项）
         events = {
             # 重置基座/机身状态
@@ -355,8 +340,8 @@ class HimGo2Env(ManagerBasedRlEnv):
                 func = mdp.reset_joints_by_offset,
                 mode = "reset",
                 params = {
-                    "position_range" : joint_offset["position_range"],
-                    "velocity_range" : joint_offset["velocity_range"],
+                    "position_range" : (-0.0, 0.0),
+                    "velocity_range" : (-0.0, 0.0),
                     "asset_cfg": joint_cfg,
                 }
             ),
@@ -378,7 +363,20 @@ class HimGo2Env(ManagerBasedRlEnv):
                 }
             )
 
-        
+        if self.cfg.domain_rand.randomize_com_displacement:
+            events["base_com"] = EventTermCfg(
+                mode="startup",
+                func=dr.body_com_offset,
+                params={
+                    "asset_cfg": body_cfg,
+                    "operation": "add",                     # 在默认质心坐标上累加偏移量
+                    "ranges": {
+                        0: tuple(self.cfg.domain_rand.com_displacement_range), # X 轴偏移范围
+                        1: tuple(self.cfg.domain_rand.com_displacement_range), # Y 轴偏移范围
+                        2: tuple(self.cfg.domain_rand.com_displacement_range), # Z 轴偏移范围
+                    },
+                },
+            )
 
 
 
