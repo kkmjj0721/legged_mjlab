@@ -77,12 +77,11 @@ class HimGo2Env(ManagerBasedRlEnv):
                 )
             ),                                             
             episode_length_s = self.ronot_cfg.env.episode_length_s,         # 单回合最长时间
-            rewards = ,
+            rewards = self._build_rewards(),                                # 挂载奖励管理器配置
             terminations = self._build_terminations(),                      # 挂载终止条件管理器配置
             commands = self._build_commands(),
             curriculum = self._build_curriculum(),
-            metrics = , 
-            recorders = ,
+            # recorders = ,
             scale_rewards_by_dt = False,
         )
 
@@ -411,7 +410,6 @@ class HimGo2Env(ManagerBasedRlEnv):
 
         return events
 
-
     def _build_commands(self, debug_vis):
         """
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/commands.html
@@ -470,6 +468,8 @@ class HimGo2Env(ManagerBasedRlEnv):
         robot_cfg = SceneEntityCfg(name = self.ronot_cfg.asset.name)
         joint_cfg = self._entity_term_cfg()
         terms = {}
+
+        return terms
 
     def _build_observations(self, play: bool):
         """ 构建观测组
