@@ -58,7 +58,6 @@ class HimGo2Env(ManagerBasedRlEnv):
             render_mode = render_mode,
         )
 
-
     def _build_mjlab_managercfg(self, play=False, debug_vis = False) -> ManagerBasedRlEnvCfg:
         """ 将 HimGo2RoughCfg 转换为 ManagerBasedRlEnvCfg 以便于使用 mjlab 的管理器进行环境管理。
         """
@@ -69,15 +68,14 @@ class HimGo2Env(ManagerBasedRlEnv):
             scene = self._build_scene(asset, play, debug_vis),              # 构建场景（包含实体、传感器、地形）
             observations = self._build_observations(),                      # 挂载观测管理器配置
             actions = self._build_actions(),                                # 挂载动作管理器配置
-            events = self._build_events(),
-            seed = self.ronot_cfg.env.seed,                                            # 随机种子
+            events = self._build_events(),                                  # 挂载事件管理器配置（reset, domain_rand）
+            seed = self.ronot_cfg.env.seed,                                 # 随机种子
             sim = SimulationCfg(                                            # 仿真引擎底层设置
                 mujoco = MujocoCfg(
                     timestep = self.ronot_cfg.sim.dt,          # 物理仿真步长
                     integrator = self.ronot_cfg.sim.gravity,   # 重力向量
                 )
             ),                                             
-            viewer = ,
             episode_length_s = self.ronot_cfg.env.episode_length_s,         # 单回合最长时间
             rewards = ,
             terminations = self._build_terminations(),                      # 挂载终止条件管理器配置
@@ -85,7 +83,6 @@ class HimGo2Env(ManagerBasedRlEnv):
             curriculum = self._build_curriculum(),
             metrics = , 
             recorders = ,
-            is_finite_horizon = ,
             scale_rewards_by_dt = False,
         )
 
