@@ -1,6 +1,6 @@
 # `him_go2` 环境续写与外部 `rsl_rl` 接入说明
 
-> 本文是 `/home/aira/docs/legged_mjlab` 的续写方案。
+> 本文是 `/home/kk/legged_mjlab` 的续写与审计方案。
 >
 > 本文只新增文档，不直接修改任何 `.py` 文件。下面的 Python 代码块是后续手工替换 `legged_mjlab/envs/him_go2/him_go2_env.py` 时使用的完整参考实现。
 
@@ -66,6 +66,10 @@ actor group 必须只产生一帧 45 维观测，顺序固定为：
 | `actions` | 12 | 上一帧 policy action |
 | **合计** | **45** | |
 
+HIM-Go2 的 policy canonical joint order 契约为：
+`FL(hip,thigh,calf), RL(hip,thigh,calf), FR(hip,thigh,calf), RR(hip,thigh,calf)`。
+这是部署 YAML 的 leg-major 顺序；它不同于当前配置字典按 hip/thigh/calf 分组的插入顺序，也不同于 XML 的 `FL,FR,RL,RR` 全局腿顺序。候选代码不定义独立的顺序常量，而是通过 `_joint_names()` 与四个分腿 action term 固定策略顺序，不能依赖 `dict`、MJCF 或 actuator 自然顺序。
+
 旧配置里的 `num_commands = 4` 包含 heading 这个命令配置字段，但 `heading_command=False` 时 heading 不进入 actor 观测；因此 actor 中必须使用 `generated_commands("twist")` 的 3 维输出。
 
 ### 3.2 critic 239 维
@@ -80,9 +84,11 @@ critic 以同样的 45 维 actor 一帧开头，再拼接：
 | `height_scan` | 17 × 11 = 187 |
 | **合计** | **239** |
 
-项目内 HIM runner 的 estimator 只消费 critic 的前 `45 + 3 = 48` 维，但 wrapper 仍然必须保留完整的 239 维 privileged observation；这样既满足 estimator 的窄输入约定，也保留完整 critic 信息供后续扩展。
+这里必须区分两套 critic layout。upstream HIMLoco 的 layout 是 `[3 维 base velocity, 45 维 actor]`；依据 `/home/kk/github/HIMLoco/rsl_rl/rsl_rl/modules/him_estimator.py:76-84`，其 `vel` 是 `next_critic_obs[:, 45:48]`，`next_obs` 是 `next_critic_obs[:, 3:48]`。本地 HIM runner 的 layout 则是 `[45 维 actor, 3 维 velocity]`；依据 `rsl_rl/rsl_rl/modules/him_estimator.py:103-109`，本地 `next_obs` 是 `next_critic_obs[..., :45]`，`vel` 是 `next_critic_obs[..., 45:48]`。这是布局差异，不是语义矛盾；两套切片不能互换。wrapper 仍然必须保留完整的 239 维 privileged observation，这样既满足 estimator 的窄输入约定，也保留完整 critic 信息供后续扩展。
 
 原生 mjlab observation group 的 `history_length` 必须保持为 `1`。6 帧历史由已有的 `HIMRslRlWrapper` 维护，否则会把 45 维再次历史展开，导致 actor 维度重复。
+
+History 的时序顺序必须与 critic 的 feature 切片分开记录。HIMLoco 在 `/home/kk/github/HIMLoco/legged_gym/legged_gym/envs/go2w/go2w_legged_robot.py:51-52` 先放入 `current_obs`，再接 `obs_buf` 中的旧帧；当前 wrapper 在 `/home/kk/legged_mjlab/legged_mjlab/wrappers/him_wrapper.py:161-180` 先将旧的 `obs_history_buf` 向后移动，再把当前 actor 写入 `obs_history_buf[:, 0]`，flatten 后的 270 维顺序是 `[current frame, older frames...]`。这个 current-first 约定不能由 upstream estimator 的 critic 切片反推。
 
 ## 4. `him_go2_env.py` 完整替换代码
 
@@ -101,6 +107,7 @@ from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.envs import mdp as envs_mdp
 from mjlab.envs.mdp import dr
 from mjlab.envs.mdp.actions import JointPositionActionCfg
+import mjlab.terrains as terrain_gen
 from mjlab.managers import (
     CurriculumTermCfg,
     EventTermCfg,
@@ -142,11 +149,30 @@ def _foot_contact_observation(env, sensor_name: str) -> torch.Tensor:
     found = sensor.data.found
     if found is None:
         raise RuntimeError(f"contact sensor {sensor_name!r} did not expose found")
-    # Current mjlab normally returns [N, feet].  Accept [N, feet, slots] as
-    # well, because num_slots is a sensor configuration detail.
+    canonical_names = tuple(
+        f"{leg}_foot_collision" for leg in ("FL", "RL", "FR", "RR")
+    )
+    primary_names = tuple(sensor.primary_names)
+    if set(primary_names) != set(canonical_names):
+        raise RuntimeError(
+            f"{sensor_name!r} must resolve exactly to {canonical_names}, "
+            f"got {primary_names}"
+        )
+    indices = [primary_names.index(name) for name in canonical_names]
+    # ContactSensor resolves primary names in entity/model order because its
+    # internal find_geoms call does not preserve the input tuple order.  Apply
+    # the policy canonical order explicitly before reducing contact slots.
+    if found.ndim == 3:
+        found = found[:, indices, :]
+    elif found.ndim == 2:
+        found = found[:, indices]
+    else:
+        raise RuntimeError(
+            f"{sensor_name!r} returned unsupported found shape {tuple(found.shape)}"
+        )
     if found.ndim == 3:
         found = found.any(dim=-1)
-    if found.ndim != 2 or found.shape[1] != 4:
+    if found.ndim != 2 or found.shape[1] != len(canonical_names):
         raise RuntimeError(
             f"{sensor_name!r} must resolve to four feet, got {tuple(found.shape)}"
         )
@@ -159,17 +185,15 @@ def track_linear_velocity(
     command_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Reward for tracking the commanded base linear velocity.
+    """Reward for tracking commanded base linear velocity in the xy plane.
 
-  The commanded z velocity is assumed to be zero.
+    The z component is handled by the independent ``lin_vel_z`` penalty.
   """
     asset: Entity = env.scene[asset_cfg.name]
     command = env.command_manager.get_command(command_name)
     assert command is not None, f"Command '{command_name}' not found."
     actual = asset.data.root_link_lin_vel_b
-    xy_error = torch.sum(torch.square(command[:, :2] - actual[:, :2]), dim=1)
-    z_error = torch.square(actual[:, 2])
-    lin_vel_error = xy_error + (2 * z_error)
+    lin_vel_error = torch.sum(torch.square(command[:, :2] - actual[:, :2]), dim=1)
     return torch.exp(-lin_vel_error / std**2)
 
 
@@ -179,17 +203,15 @@ def track_angular_velocity(
     command_name: str,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
 ) -> torch.Tensor:
-    """Reward heading error for heading-controlled envs, angular velocity for others.
+    """Reward for tracking commanded yaw angular velocity.
 
-  The commanded xy angular velocities are assumed to be zero.
+    The xy components are handled by the independent ``ang_vel_xy`` penalty.
   """
     asset: Entity = env.scene[asset_cfg.name]
     command = env.command_manager.get_command(command_name)
     assert command is not None, f"Command '{command_name}' not found."
     actual = asset.data.root_link_ang_vel_b
-    z_error = torch.square(command[:, 2] - actual[:, 2])
-    xy_error = torch.sum(torch.square(actual[:, :2]), dim=1)
-    ang_vel_error = z_error + (0.05 * xy_error)
+    ang_vel_error = torch.square(command[:, 2] - actual[:, 2])
     return torch.exp(-ang_vel_error / std**2)
 
 
@@ -204,9 +226,14 @@ def body_orientation_l2(
   """
     asset: Entity = env.scene[asset_cfg.name]
 
-    if asset_cfg.body_ids:
-        body_quat_w = asset.data.body_link_quat_w[:, asset_cfg.body_ids, :]
+    body_ids = asset_cfg.body_ids
+    if not isinstance(body_ids, slice):
+        body_quat_w = asset.data.body_link_quat_w[:, body_ids, :]
+        if body_quat_w.shape[1] != 1:
+            raise ValueError("body_orientation_l2 expects one selected body")
         body_quat_w = body_quat_w.squeeze(1)
+        # ``gravity_vec_w`` is an EntityData instance field (and can be a
+        # shared [3] vector), so retain the configured world-gravity direction.
         gravity_w = asset.data.gravity_vec_w
         projected_gravity_b = quat_apply_inverse(body_quat_w, gravity_w)
         xy_squared = torch.sum(torch.square(projected_gravity_b[:, :2]), dim=1)
@@ -275,7 +302,7 @@ def self_collision_cost(
         hit = (force_mag > force_threshold).any(dim=1)
         return hit.sum(dim=-1).float()
     assert data.found is not None
-    return data.found.squeeze(-1)
+    return (data.found > 0).any(dim=-1).float()
 
 
 def illegal_contact(
@@ -291,6 +318,39 @@ def illegal_contact(
         return (force_mag > force_threshold).any(dim=-1).any(dim=-1)
     assert data.found is not None
     return torch.any(data.found, dim=-1)
+
+
+def randomize_motor_strength(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+    strength_range: tuple[float, float],
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> None:
+    """Scale computed actuator torque before the actuator effort clamp.
+
+    This is deliberately a custom event: ``dr.effort_limits`` randomizes the
+    saturation limit and is not equivalent to legacy motor-strength DR.
+    """
+
+    asset: Entity = env.scene[asset_cfg.name]
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)
+    elif isinstance(env_ids, slice):
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.long)[env_ids]
+    else:
+        env_ids = env_ids.to(device=env.device, dtype=torch.long)
+
+    low, high = (float(strength_range[0]), float(strength_range[1]))
+    for actuator in asset.actuators:
+        setter = getattr(actuator, "set_motor_strength", None)
+        if setter is None:
+            raise TypeError(
+                "motor-strength DR requires the documentation candidate's "
+                "ScaledIdealPdActuator"
+            )
+        shape = (env_ids.numel(), actuator.target_ids.numel())
+        samples = torch.empty(shape, device=env.device).uniform_(low, high)
+        setter(env_ids, samples)
 
 
 def hip_pos(
@@ -309,12 +369,26 @@ def hip_pos(
     return torch.sum(torch.square(diff_angle), dim=1)
 
 
-def _base_height_l2(env, target_height: float, asset_cfg: SceneEntityCfg):
-    """Penalize root height relative to the terrain origin."""
+def _base_height_l2(
+    env: ManagerBasedRlEnv,
+    target_height: float,
+    sensor_name: str,
+    asset_cfg: SceneEntityCfg,
+) -> torch.Tensor:
+    """Penalize mean valid terrain-relative root height from a raycast sensor."""
 
     asset = env.scene[asset_cfg.name]
-    height = asset.data.root_link_pos_w[:, 2] - env.scene.env_origins[:, 2]
-    return torch.square(height - target_height)
+    data = env.scene[sensor_name].data
+    valid = data.distances >= 0
+    terrain_relative_height = (
+        asset.data.root_link_pose_w[:, 2].unsqueeze(-1) - data.hit_pos_w[..., 2]
+    )
+    terrain_relative_height = torch.where(
+        valid, terrain_relative_height, torch.zeros_like(terrain_relative_height)
+    )
+    valid_count = valid.sum(dim=-1).clamp_min(1)
+    measured_height = terrain_relative_height.sum(dim=-1) / valid_count
+    return torch.square(measured_height - target_height)
 
 
 def feet_clearance(
@@ -403,7 +477,7 @@ class HimGo2Env(ManagerBasedRlEnv):
     def __init__(
         self,
         cfg: HimGo2RoughCfg,
-        sim_device=None,
+        device=None,
         render_mode: str | None = None,
         play: bool = False,
         debug_vis: bool = False,
@@ -415,17 +489,39 @@ class HimGo2Env(ManagerBasedRlEnv):
             play=self.play,
             debug_vis=debug_vis,
         )
+        self.only_positive_rewards = bool(
+            getattr(cfg.rewards, "only_positive_rewards", False)
+        )
         super().__init__(
             cfg=self.managercfg,
-            device=sim_device or getattr(cfg.env, "device", "cpu"),
+            device=device or getattr(cfg.env, "device", "cpu"),
             render_mode=render_mode,
         )
 
+    def step(self, action):
+        if action.shape[-1] != 12:
+            raise ValueError(f"HIM Go2 expects 12 actions, got {action.shape}")
+        if not bool(torch.isfinite(action).all().item()):
+            raise FloatingPointError("policy action contains NaN or Inf")
+        action = torch.clamp(action, -1.0, 1.0)
+        result = super().step(action)
+        if not self.only_positive_rewards:
+            return result
+        obs, reward, terminated, truncated, extras = result
+        # mjlab does not consume the legacy `only_positive_rewards` field.
+        # Apply the legacy post-sum clamp only after all reward terms have been
+        # accumulated; termination remains a separate manager signal.
+        return obs, torch.clamp_min(reward, 0.0), terminated, truncated, extras
+
     @staticmethod
     def _joint_names(cfg) -> tuple[str, ...]:
-        """Keep the policy order declared by the legacy default-angle dict."""
+        """Return the fixed policy/deployment order, not dict insertion order."""
 
-        return tuple(cfg.init_state.default_joint_angles.keys())
+        return tuple(
+            f"{leg}_{part}_joint"
+            for leg in ("FL", "RL", "FR", "RR")
+            for part in ("hip", "thigh", "calf")
+        )
 
     @staticmethod
     def _noise(cfg, field: str, enabled: bool):
@@ -435,6 +531,18 @@ class HimGo2Env(ManagerBasedRlEnv):
         level = float(cfg.noise.noise_level)
         return Unoise(n_min=-level * scale, n_max=level * scale)
 
+    @staticmethod
+    def _obs_delay(cfg, range_field: str, enabled: bool):
+        """Convert a legacy integer-lag range to mjlab policy-step delay kwargs."""
+
+        if not enabled:
+            return {}
+        low, high = getattr(cfg.domain_rand, range_field)
+        return {
+            "delay_min_lag": int(low),
+            "delay_max_lag": int(high),
+        }
+
     def _build_mjlab_managercfg(
         self,
         cfg,
@@ -442,7 +550,8 @@ class HimGo2Env(ManagerBasedRlEnv):
         debug_vis: bool = False,
     ) -> ManagerBasedRlEnvCfg:
         entity_name = cfg.asset.name
-        asset = Go2Asset(cfg)
+        # Pass play through so actuator latency is disabled for evaluation.
+        asset = Go2Asset(cfg, play=play)
 
         if not cfg.terrain.measure_heights:
             raise ValueError(
@@ -486,10 +595,14 @@ class HimGo2Env(ManagerBasedRlEnv):
             metrics={},
             recorders={},
             is_finite_horizon=False,
-            auto_reset=True,
-            # Keep the old config's reward magnitudes as per-policy-step
-            # weights.  Enabling this would multiply them by step_dt again.
-            scale_rewards_by_dt=False,
+            # The candidate environment must expose the real terminal frame.
+            # The wrapper may assert/compatibly adapt it and reset done envs
+            # only after capture; it must not infer terminal state from an
+            # already auto-reset observation.
+            auto_reset=False,
+            # Legacy legged_gym reward scales are multiplied by the policy
+            # step_dt=0.005*4=0.02; keep mjlab's dt scaling enabled.
+            scale_rewards_by_dt=True,
         )
 
     def _build_scene(self, cfg, asset: Go2Asset, play: bool, debug_vis: bool):
@@ -513,8 +626,6 @@ class HimGo2Env(ManagerBasedRlEnv):
         foot_geoms = tuple(
             f"{leg}_foot_collision" for leg in ("FL", "FR", "RL", "RR")
         )
-        nonfoot_pattern = r".*_collision\d*$"
-
         sensors = [
             ContactSensorCfg(
                 name="feet_ground_contact",
@@ -533,9 +644,27 @@ class HimGo2Env(ManagerBasedRlEnv):
                 name="nonfoot_ground_touch",
                 primary=ContactMatch(
                     mode="geom",
-                    pattern=nonfoot_pattern,
+                    # Explicit XML names are intentional: a broad
+                    # `.*_collision` pattern would include the four foot
+                    # geoms and turn normal stance contacts into failures.
+                    pattern=(
+                        "base1_collision",
+                        "base2_collision",
+                        "base3_collision",
+                        "FL_thigh_collision",
+                        "FR_thigh_collision",
+                        "RL_thigh_collision",
+                        "RR_thigh_collision",
+                        "FL_calf1_collision",
+                        "FL_calf2_collision",
+                        "FR_calf1_collision",
+                        "FR_calf2_collision",
+                        "RL_calf1_collision",
+                        "RL_calf2_collision",
+                        "RR_calf1_collision",
+                        "RR_calf2_collision",
+                    ),
                     entity=entity_name,
-                    exclude=foot_geoms,
                 ),
                 secondary=ContactMatch(mode="body", pattern="terrain"),
                 fields=("found", "force"),
@@ -600,17 +729,73 @@ class HimGo2Env(ManagerBasedRlEnv):
                 f"HIM Go2 supports mesh_type='plane' or 'generator', got {mesh_type!r}"
             )
 
-        # ROUGH_TERRAINS_CFG is a valid mjlab preset.  An empty sub_terrains
-        # mapping is not valid.  In curriculum mode mjlab uses one column per
-        # configured subterrain type; num_cols is still retained for the
-        # non-curriculum play grid.
+        proportions = tuple(float(p) for p in cfg.terrain.terrain_proportions)
+        if len(proportions) != 5 or any(p < 0.0 for p in proportions):
+            raise ValueError(
+                "terrain_proportions must contain five non-negative values"
+            )
+        if sum(proportions) <= 0.0:
+            raise ValueError("terrain_proportions must not sum to zero")
+        terrain_size = (
+            float(cfg.terrain.terrain_length),
+            float(cfg.terrain.terrain_width),
+        )
+        hscale = float(cfg.terrain.horizontal_scale)
+        vscale = float(cfg.terrain.vertical_scale)
+        # Preserve the legacy five-way proportion order while using mjlab's
+        # native terrain config classes. In curriculum mode each key becomes
+        # one column; in random mode proportions are sampling weights.
+        sub_terrains = {
+            "smooth_slope": terrain_gen.HfPyramidSlopedTerrainCfg(
+                proportion=proportions[0],
+                size=terrain_size,
+                slope_range=(0.0, 0.7),
+                platform_width=2.0,
+                horizontal_scale=hscale,
+                vertical_scale=vscale,
+            ),
+            "rough_slope": terrain_gen.HfRandomUniformTerrainCfg(
+                proportion=proportions[1],
+                size=terrain_size,
+                noise_range=(0.02, 0.10),
+                noise_step=0.02,
+                horizontal_scale=hscale,
+                vertical_scale=vscale,
+            ),
+            "stairs_up": terrain_gen.BoxPyramidStairsTerrainCfg(
+                proportion=proportions[2],
+                size=terrain_size,
+                step_height_range=(0.0, 0.2),
+                step_width=0.3,
+                platform_width=2.0,
+            ),
+            "stairs_down": terrain_gen.BoxInvertedPyramidStairsTerrainCfg(
+                proportion=proportions[3],
+                size=terrain_size,
+                step_height_range=(0.0, 0.2),
+                step_width=0.3,
+                platform_width=2.0,
+            ),
+            "discrete": terrain_gen.HfDiscreteObstaclesTerrainCfg(
+                proportion=proportions[4],
+                size=terrain_size,
+                obstacle_width_range=(0.4, 0.8),
+                obstacle_height_range=(0.05, 0.2),
+                num_obstacles=12,
+                platform_width=1.5,
+                horizontal_scale=hscale,
+                vertical_scale=vscale,
+            ),
+        }
+
+        # ROUGH_TERRAINS_CFG supplies the remaining valid generator defaults;
+        # replace its sub-terrain table so legacy proportions and resolutions
+        # are actually consumed instead of silently using preset defaults.
         generator = replace(
             ROUGH_TERRAINS_CFG,
+            sub_terrains=sub_terrains,
             curriculum=bool(cfg.terrain.curriculum and not play),
-            size=(
-                float(cfg.terrain.terrain_length),
-                float(cfg.terrain.terrain_width),
-            ),
+            size=terrain_size,
             border_width=float(cfg.terrain.border_size),
             num_rows=5 if play else int(cfg.terrain.num_rows),
             num_cols=5 if play else int(cfg.terrain.num_cols),
@@ -626,24 +811,42 @@ class HimGo2Env(ManagerBasedRlEnv):
         )
 
     def _build_actions(self, cfg):
-        joint_names = self._joint_names(cfg)
-        scales = {
-            name: float(
-                cfg.control.action_scale
-                * (cfg.control.hip_reduction if "_hip_joint" in name else 1.0)
+        action_scale = float(cfg.control.action_scale)
+        hip_scale = action_scale * float(cfg.control.hip_reduction)
+        actions = {}
+        # JointPositionAction resolves actuator targets in entity-natural
+        # order.  Separate leg terms make the policy/deployment order explicit
+        # even though the XML leg order is FL, FR, RL, RR.
+        for leg in ("FL", "RL", "FR", "RR"):
+            leg_joint_names = tuple(
+                f"{leg}_{part}_joint" for part in ("hip", "thigh", "calf")
             )
-            for name in joint_names
-        }
-        return {
-            "joint_position": JointPositionActionCfg(
+            leg_scales = {
+                name: (
+                    hip_scale if name.endswith("_hip_joint") else action_scale
+                )
+                for name in leg_joint_names
+            }
+            default_angles = cfg.init_state.default_joint_angles
+            # mjlab applies clip after scale and default offset.  Therefore
+            # this target-space interval is the exact equivalent of raw
+            # action clip [-1, 1], without shifting the -1.5 calf pose.
+            target_clip = {
+                name: (
+                    float(default_angles[name]) - leg_scales[name],
+                    float(default_angles[name]) + leg_scales[name],
+                )
+                for name in leg_joint_names
+            }
+            actions[f"{leg.lower()}_joint_position"] = JointPositionActionCfg(
                 entity_name=cfg.asset.name,
-                actuator_names=joint_names,
-                scale=scales,
+                actuator_names=(rf"^{leg}_(?:hip|thigh|calf)_joint$",),
+                scale=leg_scales,
                 use_default_offset=True,
                 preserve_order=True,
-                clip=None,
+                clip=target_clip,
             )
-        }
+        return actions
 
     def _build_events(self, cfg, play: bool):
         entity_name = cfg.asset.name
@@ -667,17 +870,26 @@ class HimGo2Env(ManagerBasedRlEnv):
         body_cfg = SceneEntityCfg(entity_name, body_names=("base_link",))
         all_body_cfg = SceneEntityCfg(entity_name, body_names=(".*",))
 
+        reset_pose_range = {
+            "x": (-0.5, 0.5),
+            "y": (-0.5, 0.5),
+            "z": (0.0, 0.0),
+            "yaw": (-math.pi, math.pi),
+        }
+        if play:
+            # Evaluation should be reproducible by default.  Reset events are
+            # still needed for the wrapper's partial-reset path, but their
+            # pose must not introduce an unreported random initial condition.
+            reset_pose_range = {
+                key: (0.0, 0.0) for key in reset_pose_range
+            }
+
         events = {
             "reset_base": EventTermCfg(
                 func=mdp.reset_root_state_uniform,
                 mode="reset",
                 params={
-                    "pose_range": {
-                        "x": (-0.5, 0.5),
-                        "y": (-0.5, 0.5),
-                        "z": (0.0, 0.0),
-                        "yaw": (-math.pi, math.pi),
-                    },
+                    "pose_range": reset_pose_range,
                     "velocity_range": {},
                     "asset_cfg": SceneEntityCfg(entity_name),
                 },
@@ -693,7 +905,13 @@ class HimGo2Env(ManagerBasedRlEnv):
             ),
         }
 
-        if not play and cfg.domain_rand.push_robots:
+        # All domain-randomization events are disabled in play mode, including
+        # startup events. Returning here prevents a later DR addition from
+        # accidentally leaking into evaluation.
+        if play:
+            return events
+
+        if cfg.domain_rand.push_robots:
             max_push = float(cfg.domain_rand.max_push_vel_xy)
             events["push_robot"] = EventTermCfg(
                 func=mdp.push_by_setting_velocity,
@@ -703,6 +921,7 @@ class HimGo2Env(ManagerBasedRlEnv):
                     float(cfg.domain_rand.push_interval_s),
                 ),
                 params={
+                    "asset_cfg": SceneEntityCfg(entity_name),
                     "velocity_range": {
                         "x": (-max_push, max_push),
                         "y": (-max_push, max_push),
@@ -714,6 +933,17 @@ class HimGo2Env(ManagerBasedRlEnv):
                 },
             )
 
+        if cfg.domain_rand.randomize_payload_mass:
+            events["payload_mass"] = EventTermCfg(
+                mode="startup",
+                func=dr.body_mass,
+                params={
+                    "asset_cfg": body_cfg,
+                    "operation": "add",
+                    "ranges": tuple(cfg.domain_rand.payload_mass_range),
+                },
+            )
+
         if cfg.domain_rand.randomize_friction:
             events["foot_friction"] = EventTermCfg(
                 mode="startup",
@@ -721,18 +951,23 @@ class HimGo2Env(ManagerBasedRlEnv):
                 params={
                     "asset_cfg": foot_cfg,
                     "operation": "abs",
-                    "ranges": (0.3, 1.6),
+                    "ranges": tuple(cfg.domain_rand.friction_range),
                     "shared_random": True,
                 },
             )
 
         if cfg.domain_rand.randomize_motor_zero_offset:
+            zero_offset_range = getattr(
+                cfg.domain_rand,
+                "motor_zero_pos_offset_range",
+                getattr(cfg.domain_rand, "motor_zero_offset_range", (0.0, 0.0)),
+            )
             events["encoder_bias"] = EventTermCfg(
                 mode="startup",
                 func=dr.encoder_bias,
                 params={
                     "asset_cfg": joint_cfg,
-                    "bias_range": tuple(cfg.domain_rand.motor_zero_offset_range),
+                    "bias_range": tuple(zero_offset_range),
                 },
             )
 
@@ -808,15 +1043,12 @@ class HimGo2Env(ManagerBasedRlEnv):
             )
 
         if cfg.domain_rand.randomize_motor_strength:
-            events["effort_limits"] = EventTermCfg(
+            events["motor_strength"] = EventTermCfg(
                 mode="startup",
-                func=dr.effort_limits,
+                func=randomize_motor_strength,
                 params={
                     "asset_cfg": actuator_cfg,
-                    "operation": "scale",
-                    "effort_limit_range": tuple(
-                        cfg.domain_rand.motor_strength_range
-                    ),
+                    "strength_range": tuple(cfg.domain_rand.motor_strength_range),
                 },
             )
 
@@ -947,6 +1179,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             _base_height_l2,
             {
                 "target_height": float(cfg.rewards.base_height_target),
+                "sensor_name": "height_scan",
                 "asset_cfg": SceneEntityCfg(entity_name),
             },
         )
@@ -1066,11 +1299,21 @@ class HimGo2Env(ManagerBasedRlEnv):
                 params={"sensor_name": f"{entity_name}/imu_ang_vel"},
                 noise=self._noise(cfg, "ang_vel", noise_enabled),
                 scale=float(cfg.normalization.obs_scales.ang_vel),
+                **self._obs_delay(
+                    cfg,
+                    "range_obs_imu_latency",
+                    cfg.domain_rand.randomize_obs_imu_latency and not play,
+                ),
             ),
             "projected_gravity": ObservationTermCfg(
                 func=envs_mdp.projected_gravity,
                 params={"asset_cfg": SceneEntityCfg(entity_name)},
                 noise=self._noise(cfg, "gravity", noise_enabled),
+                **self._obs_delay(
+                    cfg,
+                    "range_obs_imu_latency",
+                    cfg.domain_rand.randomize_obs_imu_latency and not play,
+                ),
             ),
             "command": ObservationTermCfg(
                 func=envs_mdp.generated_commands,
@@ -1078,25 +1321,60 @@ class HimGo2Env(ManagerBasedRlEnv):
             ),
             "joint_pos": ObservationTermCfg(
                 func=envs_mdp.joint_pos_rel,
-                params={"asset_cfg": joint_cfg},
+                params={"biased": True, "asset_cfg": joint_cfg},
                 noise=self._noise(cfg, "dof_pos", noise_enabled),
                 scale=float(cfg.normalization.obs_scales.dof_pos),
+                **self._obs_delay(
+                    cfg,
+                    "range_obs_motor_latency",
+                    cfg.domain_rand.randomize_obs_motor_latency and not play,
+                ),
             ),
             "joint_vel": ObservationTermCfg(
                 func=envs_mdp.joint_vel_rel,
                 params={"asset_cfg": joint_cfg},
                 noise=self._noise(cfg, "dof_vel", noise_enabled),
                 scale=float(cfg.normalization.obs_scales.dof_vel),
+                **self._obs_delay(
+                    cfg,
+                    "range_obs_motor_latency",
+                    cfg.domain_rand.randomize_obs_motor_latency and not play,
+                ),
             ),
             "actions": ObservationTermCfg(func=envs_mdp.last_action),
         }
 
+        # ``enable_corruption=False`` disables noise models, but the
+        # ObservationManager still applies a term's delay buffer.  Build a
+        # genuinely clean privileged copy instead of shallow-copying delayed
+        # actor terms.  Encoder bias is an actor-side observation effect too.
         critic_terms = {
-            **actor_terms,
+            name: replace(
+                term,
+                noise=None,
+                delay_min_lag=0,
+                delay_max_lag=0,
+                delay_hold_prob=0.0,
+                delay_update_period=0,
+                params=(
+                    {"asset_cfg": joint_cfg}
+                    if name == "joint_pos"
+                    else dict(term.params)
+                ),
+            )
+            for name, term in actor_terms.items()
+        }
+        critic_terms["joint_pos"] = replace(
+            critic_terms["joint_pos"],
+            params={"biased": False, "asset_cfg": joint_cfg},
+        )
+        critic_terms.update({
             "base_lin_vel": ObservationTermCfg(
-                func=envs_mdp.builtin_sensor,
-                params={"sensor_name": f"{entity_name}/imu_lin_vel"},
-                scale=float(cfg.normalization.obs_scales.lin_vel),
+                # Use root-link velocity in the body frame.  The XML
+                # velocimeter at the IMU site is not automatically identical
+                # to the legacy root-state velocity used by HIM.
+                func=envs_mdp.base_lin_vel,
+                params={"asset_cfg": SceneEntityCfg(entity_name)},
             ),
             "foot_contact": ObservationTermCfg(
                 func=_foot_contact_observation,
@@ -1107,7 +1385,7 @@ class HimGo2Env(ManagerBasedRlEnv):
                 params={"sensor_name": "height_scan"},
                 scale=float(cfg.normalization.obs_scales.height_measurements),
             ),
-        }
+        })
 
         return {
             "actor": ObservationGroupCfg(
@@ -1143,6 +1421,13 @@ class HimGo2Env(ManagerBasedRlEnv):
                 func=illegal_contact,
                 params={
                     "sensor_name": "base_ground_touch",
+                    "force_threshold": 10.0,
+                },
+            ),
+            "nonfoot_contact": TerminationTermCfg(
+                func=illegal_contact,
+                params={
+                    "sensor_name": "nonfoot_ground_touch",
                     "force_threshold": 10.0,
                 },
             ),
@@ -1207,19 +1492,19 @@ rewards = {
 }
 ```
 
-本文件的完整替换代码为了保持“单文件可复制”，直接采用了 Unitree 的函数命名和函数签名，例如 `track_linear_velocity`、`feet_air_time`、`feet_clearance`、`self_collision_cost` 和 `stand_still`；这些实现按 `src/tasks/velocity/mdp/rewards.py` 对齐。若以后把奖励拆到独立的 `him_go2/mdp/rewards.py`，可以原样移动这些函数，然后在环境配置中以 `mdp.<function>` 注册，不要再引入 `velocity_mdp` 这个别名。
+本文件的完整替换代码为了保持“单文件可复制”，借用了 Unitree 的函数命名和函数签名，例如 `track_linear_velocity`、`feet_air_time`、`feet_clearance`、`self_collision_cost` 和 `stand_still`；这只说明注册接口和部分非 tracking term 的参考来源，不能视为所有实现的数值语义都与 Unitree 对齐。tracking 两项明确按 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/legged_gym_go1` 的 legacy 轴语义：线速度只跟踪 xy，角速度只跟踪 yaw。Unitree mjlab 的原 `track_linear_velocity` 还把 z 项合并到 tracking，原 `track_angular_velocity` 还把 xy 项合并到 tracking；本候选则将 z/xy 分别保留为独立的 `lin_vel_z`/`ang_vel_xy` reward term。若以后把奖励拆到独立的 `him_go2/mdp/rewards.py`，可以原样移动这些函数，然后在环境配置中以 `mdp.<function>` 注册，不要再引入 `velocity_mdp` 这个别名。
 
 本次修订的关键映射如下：
 
 | 旧 reward 名 | 修订后的函数 | 实现来源/语义 |
 | --- | --- | --- |
-| `tracking_lin_vel` | `track_linear_velocity` | 与 Unitree 相同的指数型线速度跟踪，额外抑制 base 的 z 速度 |
-| `tracking_ang_vel` | `track_angular_velocity` | 与 Unitree 相同的 yaw 跟踪，同时弱惩罚 xy 角速度 |
+| `tracking_lin_vel` | `track_linear_velocity` | 按 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/legged_gym_go1` 的 legacy 轴语义，只计算 command/actual 的 xy 误差；Unitree mjlab 原函数还把 z 项并入 tracking，本候选由独立的 `lin_vel_z` term 承担 |
+| `tracking_ang_vel` | `track_angular_velocity` | 按 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/legged_gym_go1` 的 legacy 轴语义，只计算 command/actual 的 yaw 误差；Unitree mjlab 原函数还把 xy 项并入 tracking，本候选由独立的 `ang_vel_xy` term 承担 |
 | `lin_vel_z` / `ang_vel_xy` | `lin_vel_z` / `ang_vel_xy` | 补回旧配置中原本非零、但上一版漏注册的两项 |
 | `orientation` | `body_orientation_l2` | 用 projected gravity 的 xy 分量衡量身体倾斜 |
 | `feet_air_time` | `feet_air_time` | 使用 Unitree 的 `threshold`；不再传不存在的 `threshold_min/threshold_max` |
 | `foot_clearance` | `feet_clearance` | 直接采用 Unitree 的 foot site 高度与水平速度实现，不把 `height_scan` 误传给官方同名函数 |
-| `collision` | `self_collision_cost` | 使用 `nonfoot_ground_touch` 的 force history 和 `max_contact_force` |
+| `collision` | `self_collision_cost` | 使用 `nonfoot_ground_touch` 的 force history 和 `max_contact_force`；candidate 的 `max_contact_force=100` 仅是候选策略值，不等于 legacy contact force `>0.1` 或 Unitree `self_collision` 默认 `10`，runtime 仍为 `NOT_RUN` |
 | `stand_still` | `stand_still` | 低速命令时惩罚相对默认姿态的关节误差 |
 | `hip_pos` | `hip_pos` | 修正为 hip 相对默认关节姿态的 L2，不再错误复用 `joint_pos_limits` |
 
@@ -1233,6 +1518,7 @@ rewards = {
 - 旧的 `torque_limits` 不是一个标准 mjlab reward term；代码使用每个 `IdealPdActuator` 的 `force_limit` 做超限惩罚。物理 actuator 限幅本身仍由 `Go2Asset` 完成。
 - `tracking_sigma=0.25` 表示指数跟踪函数的 `std=sqrt(tracking_sigma)`；这与 Unitree 配置中显式写 `math.sqrt(0.25)` 的语义一致。
 - `feet_air_time` 依赖 `feet_ground_contact` 开启 `track_air_time=True`，`collision` 与 `base_contact` 分别依赖接触传感器的 `force_history`；因此这两个 reward/termination 不能只注册函数而不配置对应 sensor field/history。
+- candidate 配置中的 `max_contact_force=100.0` 仅是 collision 的候选策略值，不等于 legacy contact force `>0.1`，也不等于 Unitree `self_collision` 默认 `10`；collision runtime 仍为 `NOT_RUN`。
 - `terrain_proportions` 没有直接传进 `ROUGH_TERRAINS_CFG`。官方 rough preset 已经提供非空的 `sub_terrains`；curriculum 模式按这些子地形类型生成列。若必须复现旧的五比例地形，需要在代码中显式构造每个 `SubTerrainCfg`，不能保留空字典。
 - 当前仓库配置中的 restitution、payload mass 和部分 latency 字段没有在本文件中伪造为不存在的事件。它们应分别映射到 `dr` 中对应的 model field 或显式 sensor/action delay；先保证主环境和 shape contract 可运行。
 
@@ -1260,17 +1546,17 @@ algorithm_class_name = "HIMPPO"
 在项目虚拟环境中执行：
 
 ```bash
-cd /home/aira/docs/legged_mjlab
+cd /home/kk/legged_mjlab
 source .venv/bin/activate
-python -m pip install -e .
+uv pip install --python .venv/bin/python -e .
 ```
 
 然后先验证 runner 来源，不要直接启动 4096 个环境：
 
 ```bash
-cd /home/aira/docs/legged_mjlab
+cd /home/kk/legged_mjlab
 source .venv/bin/activate
-PYTHONPATH=/home/aira/docs/legged_mjlab python - <<'PY'
+PYTHONPATH=/home/kk/legged_mjlab python - <<'PY'
 from pathlib import Path
 
 from legged_mjlab.utils.task_registry import load_project_rsl
@@ -1292,9 +1578,9 @@ PY
 现有 `scripts/train.py` 已经使用 `task_registry.make_env()` 和 `make_alg_runner()`，建议先用小批量和 1 个 iteration 做 shape smoke test：
 
 ```bash
-cd /home/aira/docs/legged_mjlab
+cd /home/kk/legged_mjlab
 source .venv/bin/activate
-PYTHONPATH=/home/aira/docs/legged_mjlab python -m legged_mjlab.scripts.train \
+PYTHONPATH=/home/kk/legged_mjlab python -m legged_mjlab.scripts.train \
   --task him_go2 \
   --device cpu \
   --num-envs 4 \
@@ -1304,8 +1590,10 @@ PYTHONPATH=/home/aira/docs/legged_mjlab python -m legged_mjlab.scripts.train \
 
 确认 CPU smoke test 通过后，再切换到 GPU 和正式数量：
 
+资源预检必须单独记录。critic 的 height scan 是每个环境 17×11=187 条 ray，4096 个环境会同时放大 raycast、contact history、HIM history、CPU 调度和 GPU/warp 显存压力；当前工作树没有 NVIDIA driver 可用的证据。因此先完成 4-env CPU，再按 16→64→256 等小规模阶梯做 GPU（若设备可用）验证，记录峰值显存、耗时和 reset/step 是否稳定，最后才尝试 4096。GPU/显存不足属于资源未验证或资源阻断，不得被记为环境接口或训练代码已通过。
+
 ```bash
-PYTHONPATH=/home/aira/docs/legged_mjlab python -m legged_mjlab.scripts.train \
+PYTHONPATH=/home/kk/legged_mjlab python -m legged_mjlab.scripts.train \
   --task him_go2 \
   --device cuda:0 \
   --num-envs 4096 \
@@ -1326,7 +1614,7 @@ PYTHONPATH=/home/aira/docs/legged_mjlab python -m legged_mjlab.scripts.train \
 )
 ```
 
-这正是项目内 `HIMOnPolicyRunner._unpack_step()` 支持的 terminal privileged observation 路径。wrapper 会把原生 `ManagerBasedRlEnvCfg.auto_reset` 改为 `False`，先保留真正的 terminal critic frame，再只 reset 已结束的环境；这一步不能删掉，否则 timeout bootstrap 会使用 reset 后的错误状态。
+这正是项目内 `HIMOnPolicyRunner._unpack_step()` 支持的 terminal privileged observation 路径。候选 `ManagerBasedRlEnvCfg.auto_reset` 必须直接设为 `False`，由候选环境在 `step()` 中先保留真实 terminal critic frame；`HIMRslRlWrapper` 只负责断言 frame/shape/索引并做兼容适配，确认捕获后才 reset 已结束的环境。不能先 auto-reset，再依赖 wrapper 从 reset 后 observation 猜测 terminal frame，否则 timeout bootstrap 会使用错误状态。
 
 ## 6. 训练前的 smoke test
 
@@ -1335,7 +1623,7 @@ PYTHONPATH=/home/aira/docs/legged_mjlab python -m legged_mjlab.scripts.train \
 手工把代码复制到目标 `.py` 后执行：
 
 ```bash
-cd /home/aira/docs/legged_mjlab
+cd /home/kk/legged_mjlab
 source .venv/bin/activate
 python -m py_compile legged_mjlab/envs/him_go2/him_go2_env.py
 ```
@@ -1343,9 +1631,9 @@ python -m py_compile legged_mjlab/envs/him_go2/him_go2_env.py
 ### 6.2 manager 配置检查
 
 ```bash
-cd /home/aira/docs/legged_mjlab
+cd /home/kk/legged_mjlab
 source .venv/bin/activate
-PYTHONPATH=/home/aira/docs/legged_mjlab python - <<'PY'
+PYTHONPATH=/home/kk/legged_mjlab python - <<'PY'
 from legged_mjlab.envs.him_go2.him_go2_config import HimGo2RoughCfg
 from legged_mjlab.envs.him_go2.him_go2_env import HimGo2Env
 
@@ -1362,7 +1650,15 @@ assert manager_cfg.sim.mujoco.integrator == "implicitfast"
 assert manager_cfg.sim.mujoco.gravity == (0.0, 0.0, -9.81)
 assert manager_cfg.scene.terrain.terrain_generator is not None
 assert manager_cfg.observations["actor"].history_length == 1
-assert manager_cfg.actions["joint_position"].actuator_names
+assert all(
+    manager_cfg.actions[name].actuator_names
+    for name in (
+        "fl_joint_position",
+        "rl_joint_position",
+        "fr_joint_position",
+        "rr_joint_position",
+    )
+)
 print("manager config construction: OK")
 PY
 ```
@@ -1370,9 +1666,9 @@ PY
 ### 6.3 真正环境的 shape 检查
 
 ```bash
-cd /home/aira/docs/legged_mjlab
+cd /home/kk/legged_mjlab
 source .venv/bin/activate
-PYTHONPATH=/home/aira/docs/legged_mjlab python - <<'PY'
+PYTHONPATH=/home/kk/legged_mjlab python - <<'PY'
 import torch
 
 import legged_mjlab.envs  # registers him_go2
@@ -1411,12 +1707,13 @@ PY
 
 ## 7. 与参考实现的对应关系
 
-- `unitree_rl_mjlab/src/tasks/velocity/velocity_env_cfg.py` 提供了当前 mjlab 1.6.0 的 manager 配置组织方式：scene、sensor、observation、action、command、event、reward、termination、curriculum 都在一个 flat `ManagerBasedRlEnvCfg` 中组装。
+- `unitree_rl_mjlab/src/tasks/velocity/velocity_env_cfg.py` 的 pinned 依赖是 `mjlab==1.2.0`、`mujoco-warp==3.5.0`；其 scene、sensor、observation、action、command、event、reward、termination、curriculum 的 flat `ManagerBasedRlEnvCfg` 组织方式在本文仅作迁移组织参考，不是当前 mjlab v1.6.0 的 API 或运行证据。
+- 官方 mjlab v1.6.0 的 API 与迁移规则另见第 9.3 节。
 - `unitree_rl_mjlab/src/tasks/velocity/mdp/rewards.py` 才是 Unitree velocity task 的任务特有奖励实现；其中的 `track_linear_velocity`、`feet_clearance`、`feet_air_time` 和 `stand_still` 通过 `RewardTermCfg(func=mdp.<name>, ...)` 注册。
 - `unitree_rl_mjlab/src/tasks/velocity/config/go2/env_cfgs.py` 提供了 Go2 的实际接触 geom、site、raycast frame、rough-terrain play override 和 `illegal_contact` 组织方式。
 - `AMP_mjlab/src/tasks/amp_loco/amp_env_cfg.py` 与其 MDP term 展示了 `RewardTermCfg`、`TerminationTermCfg`、`SceneEntityCfg` 的可复制写法。
 - `legged_gym` 的 legacy 配置仍然适合用来核对 observation/reward 的语义和维度，但不能直接把它的 manager、clip、reset 或旧 sensor 字段搬进 mjlab。
-- 官方 mjlab 文档中的 [environment config](https://mujocolab.github.io/mjlab/main/source/environment_config.html)、[observations](https://mujocolab.github.io/mjlab/main/source/observations.html)、[actions](https://github.com/mujocolab/mjlab/blob/main/docs/source/actions.rst)、[events](https://mujocolab.github.io/mjlab/main/source/events.html)、[rewards](https://mujocolab.github.io/mjlab/main/source/rewards.html)、[terminations](https://mujocolab.github.io/mjlab/main/source/terminations.html)、[terrain](https://mujocolab.github.io/mjlab/main/source/terrain.html) 是当前 API 对照入口。
+- 官方 mjlab 文档中的 [environment config](https://mujocolab.github.io/mjlab/main/source/environment_config.html)、[observations](https://mujocolab.github.io/mjlab/main/source/observations.html)、[actions](https://mujocolab.github.io/mjlab/main/source/actions.html)、[events](https://mujocolab.github.io/mjlab/main/source/events.html)、[rewards](https://mujocolab.github.io/mjlab/main/source/rewards.html)、[terminations](https://mujocolab.github.io/mjlab/main/source/terminations.html)、[terrain](https://mujocolab.github.io/mjlab/main/source/terrain.html) 是当前 API 对照入口。
 
 ## 8. 完成判据
 
@@ -1427,6 +1724,1153 @@ PY
 - XML 的 actuator、joint、site、geom 全部匹配；
 - actor 为 `[N, 45]`，wrapper history 为 `[N, 270]`；
 - critic 为 `[N, 239]`，其中前 48 维符合 HIM estimator；
-- done 环境的 terminal privileged observation 能被 runner 使用；
+- 候选环境在 `auto_reset=False` 时直接提供真实 terminal privileged observation，wrapper 只做断言/兼容后供 runner 使用；
 - runtime `rsl_rl.__file__` 指向项目内 `legged_mjlab/rsl_rl/rsl_rl`；
 - 4 环境 CPU、1 iteration smoke test 通过后，才启动 GPU/4096 环境正式训练。
+
+## 9. 2026-08-28 审计勘误与最终接线矩阵
+
+本节是对前文方案的强制勘误。它按当前工作树重新核对，不能把“配置类里出现了字段”解释成“运行时已经生效”。本轮只修改本文档；源码仍保持审计开始时的状态。
+
+### 9.1 当前结论
+
+| 层 | 当前事实 | 状态 |
+|---|---|---|
+| Python 入口 | `him_go2_env.py:83` 为 `recorders = ,` | 阻断 import |
+| Asset | `Go2Asset._parse_cfg()` 在 `self.entity` 创建前访问 `self.robot_cfg`/`self.asset` | 阻断构造 |
+| Manager | builder 的参数签名、`MujocoCfg.integrator`、actions 字段、command range 均有错配 | 未对齐 |
+| Registry → Env | `task_registry.py:201` 传 `device=...`，而当前 `HimGo2Env.__init__` 仍只接收 `sim_device` | P0 构造阻断 |
+| Action order | 当前配置 dict 是“按关节类型分组”的插入顺序；部署是 leg-major `FL, RL, FR, RR`；XML runtime 是 leg-major `FL, FR, RL, RR`；当前源码没有可直接复用的唯一重排表 | 文档候选以 canonical joint order 为契约，通过 `_joint_names()` 与四个分腿 action term 固定 `FL,RL,FR,RR × hip,thigh,calf` 的策略顺序；仍需 P0 round-trip 验证 |
+| Effort/clip | 仿真 calf 为 `45 N*m`，部署为 `35.55 N*m`；当前 action clip 字段也不合法 | P0 安全阻断 |
+| Delay/fail-safe | action latency 的 physics/policy 单位未闭环；部署无已验证 watchdog、安全停机和断连处理 | P0 安全阻断 |
+| Actor observation | 目标单帧 45，但当前 builder 只写了两个 term 且没有返回字典 | 未实现 |
+| Native critic | 目标可构造为 `45+3+4+187=239` | 文档目标，源码未实现 |
+| HIM runner critic | `rsl_rl/rsl_rl/runners/him_on_policy_runner.py:165-168` 固定为 `45+3=48`，并在 `:469-492` 截断更宽 critic | 已实现为 48，和 native 239 是两层契约 |
+| Reward | `him_go2_config.py:174-202` 有非零 scale，但 `_build_rewards()` 返回空字典 | 实际注册 0 项 |
+| Domain randomization | payload、mass/inertia、armature、friction、restitution、motor strength、latency、push 等未形成可验证接线 | 未放行 |
+| Termination/safety | `terminate_after_contacts_on=[]`，当前仅 timeout；初始姿态、落地冲击、危险接触均未验证 | P0 安全阻断 |
+| Task/训练 | 本地 registry、HIM wrapper、HIM runner 已存在；`play.py` 与 `test_env.py` 为空 | 入口未闭环 |
+| 安装 | 当前 `.venv` 没有 `pip`；根目录也没有 `pyproject.toml`/`uv.lock`/console script | 文档必须使用 `uv pip` |
+
+因此当前项目的准确描述是：**架构方向正确，但环境不是“差几项配置”，而是尚未通过 import、asset、manager、shape 和 runner contract 的连续验收。**
+
+### 9.2 配置字段逐项接线状态
+
+#### Reward scale
+
+| legacy scale | 当前声明 | 文档中应接到的 manager term | 依赖与状态 |
+|---|---:|---|---|
+| `tracking_lin_vel` | `1.0` | `track_linear_velocity` | 按 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/legged_gym_go1` 的 legacy 轴语义使用 `twist`/base body velocity 的 xy 误差；z 惩罚由独立 `lin_vel_z` term 承担；当前未注册 |
+| `tracking_ang_vel` | `0.5` | `track_angular_velocity` | 按 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/legged_gym_go1` 的 legacy 轴语义使用 `twist`/base angular velocity 的 yaw 误差；xy 惩罚由独立 `ang_vel_xy` term 承担；当前未注册 |
+| `lin_vel_z` | `-1.5` | `lin_vel_z` | robot root body z 速度的独立惩罚；当前未注册 |
+| `ang_vel_xy` | `-0.05` | `ang_vel_xy` | robot root body xy 角速度的独立惩罚；当前未注册 |
+| `orientation` | `-0.2` | `body_orientation_l2`/`flat_orientation_l2` | projected gravity；当前未注册 |
+| `dof_acc` | `-2.5e-7` | `envs_mdp.joint_acc_l2` | 12 joint order；当前未注册 |
+| `joint_power` | `-2e-5` | 自定义 `_joint_power_l1` | 需要 actuator force 与 joint velocity；当前未注册 |
+| `base_height` | `-1.0` | 自定义 `_base_height_l2` | `height_scan` 有效命中的 terrain-relative measured height 均值与 target `0.30`；当前未注册 |
+| `foot_clearance` | `-0.01` | 自定义 `feet_clearance` | 四个 foot site；当前未注册 |
+| `action_rate` | `-0.01` | `envs_mdp.action_rate_l2` | action manager history；当前未注册 |
+| `smoothness` | `-0.01` | `envs_mdp.action_acc_l2` | 二阶 action history；当前未注册 |
+| `feet_air_time` | `+0.1` | `feet_air_time` | `track_air_time=True` contact sensor；当前未注册 |
+| `collision` | `-0.5` | `self_collision_cost`/illegal contact cost | non-foot force history；当前未注册 |
+| `feet_stumble` | `-0.0` | 不注册 | 当前权重为零；没有可宣称的活动 term |
+| `stand_still` | `-1.0` | `stand_still` | low-command gate + default pose；当前未注册 |
+| `torques` | `-0.0` | `joint_torques_l2` | 当前权重为零，按约定不注册 |
+| `dof_vel` | `-0.0` | `joint_vel_l2` | 当前权重为零，按约定不注册 |
+| `dof_pos_limits` | `-10.0` | `joint_pos_limits` | soft joint limits；当前未注册 |
+| `dof_vel_limits` | `-0.0` | 自定义/不注册 | 当前权重为零 |
+| `torque_limits` | `-1.0` | 自定义 force-limit cost | 不是普通 torque L2；需要 actuator force limit |
+| `hip_pos` | `-1.0` | `hip_pos` | hip 四关节独立 `SceneEntityCfg`；当前未注册 |
+| `termination` | `-0.0` | `is_terminated` 或自定义 terminal term | 当前权重为零；不能混淆 termination manager |
+
+#### Reward 参数字段（不是 scale）
+
+这些字段也存在于 legacy 配置，但不会因为出现在 `rewards` 类中就自动进入 mjlab manager。表中“候选使用”只描述文档候选代码显式读取了该字段；当前仓库的 `HimGo2Env` 仍未完成可导入/运行闭环。
+
+| legacy 参数 | 当前声明 | 候选接线 | 当前状态 |
+|---|---:|---|---|
+| `tracking_sigma` | `0.25` | 跟踪 term 使用 `std=sqrt(tracking_sigma)` | 候选使用，未完成真实 manager/reward 数值验证 |
+| `soft_dof_pos_limit` | `0.85` | 传给 `EntityArticulationInfoCfg.soft_joint_pos_limit_factor`，由 `joint_pos_limits` 使用 | 当前源码未接入；候选显式使用，未运行证明 |
+| `soft_dof_vel_limit` | `1.0` | 无活动映射；`dof_vel_limits` scale 为 `-0.0`，且没有额外 velocity-limit term | **声明但不生效**；不得写成已接入的 soft velocity limit |
+| `soft_torque_limit` | `1.0` | 候选自定义 `_torque_limit_cost(soft_limit=...)` | 当前源码未接入；候选显式使用，未运行证明 |
+| `base_height_target` | `0.30` | 候选自定义 `_base_height_l2(target_height=..., sensor_name="height_scan")` | 当前源码未接入；候选显式使用，未运行证明 |
+| `max_contact_force` | `100.0` | candidate collision 的候选策略阈值 `self_collision_cost(force_threshold=...)`；不等于 legacy contact force `>0.1` 或 Unitree `self_collision` 默认 `10` | 当前源码未接入；collision runtime 为 `NOT_RUN`，未运行证明 |
+| `clearance_height_target` | `-0.2` | 候选转换为 `feet_clearance` 的正高度目标 `0.2 m` | 当前源码未接入；候选显式使用，仍需数值校准 |
+| `only_positive_rewards` | `True` | 候选在 `super().step()` 汇总后执行 `reward.clamp_min(0.0)` | mjlab 不自动读取；当前源码未接入，候选顺序仍需 runtime 验证 |
+
+所有非零 term 都必须满足：函数输出 `[N]`，`RewardTermCfg.weight` 直接使用该表的 raw legacy scale，sensor/command/entity 参数显式传入。候选必须保持 `scale_rewards_by_dt=True`，让 legacy legged_gym 的 reward scale 统一乘 policy `step_dt=0.005*4=0.02`。禁止使用 raw legacy scales + `scale_rewards_by_dt=False`，否则会产生约 `1/0.02=50` 倍的 reward 漂移；也禁止先手工把 scale 乘 `dt` 后再设为 `True`，否则会重复乘一次 `dt`。函数输出和 weight 只能保留这一条 dt 缩放路径。
+
+特别注意：mjlab 的 `RewardManager` 不会读取 `legacy rewards.only_positive_rewards`。如果要保留当前 `True` 的语义，必须在环境 reward 汇总之后显式执行 `reward.clamp_min(0.0)`，并验证 termination penalty 是否应在截断前还是截断后加入；如果不打算改环境生命周期，则应把该字段改为明确的“不生效/待迁移”，不能默认为已接入。
+
+#### Domain randomization
+
+| flag | legacy 范围 | mjlab 1.6.0 映射 | 生命周期 | 当前状态 |
+|---|---|---|---|---|
+| `randomize_payload_mass` | `[-2.5,2.5] kg` | `dr.body_mass` 对 `base_link`，`operation="add"` | `reset` 或 `startup` | 当前是 `pass`，未接入；候选已显式注册，但未运行证明 |
+| `randomize_link_mass` | `[0.9,1.1]` ratio | `dr.body_mass`，`operation="scale"` | `startup`/`reset` | 配置声明，当前未接入；只改 mass，不等价于同步 inertia |
+| `randomize_com_displacement` | `[-0.05,0.05] m` | `dr.body_com_offset` 的 x/y/z | `startup`/`reset` | 候选事件，未运行证明，未放行 |
+| `randomize_joint_friction` | `[0.01,1.15]` | `dr.joint_friction` | `startup`/`reset` | 候选事件，未运行证明，未放行 |
+| `randomize_joint_damping` | `[0.3,1.5]` | `dr.joint_damping` | `startup`/`reset` | 候选事件，未运行证明，未放行 |
+| `randomize_joint_armature` | `[0.0001,0.05]` | `dr.joint_armature`/`dr.dof_armature` | `startup`/`reset` | 当前未接入 |
+| `randomize_friction` | `[0.2,1.3]` | `dr.geom_friction` 足端 geom；若使用 pair 必须有显式 contact pair | `reset` | 当前未接入 |
+| `randomize_restitution` | `[0,0.4]` | 需要对应 geom/contact model 字段的自定义映射 | `reset` | 不能用不存在的 `dr.restitution` 冒充，未接入 |
+| `push_robots` | interval `4 s`, max `1 m/s` | `mdp.push_by_setting_velocity` | `interval` | 候选注册，未放行；play 必须关闭 |
+| `randomize_pd_gains` | Kp/Kd `[0.8,1.2]` | `dr.pd_gains`，`operation="scale"` | `startup`/`reset` | v1.6.0 API 支持 `IdealPdActuator`；候选事件尚未运行证明，未放行 |
+| `randomize_motor_zero_offset` + `motor_zero_pos_offset_range` | pos `[-0.035,0.035]` | `dr.encoder_bias` | `startup`/`reset` | 当前源码未接入；候选只接 position bias，未运行证明 |
+| `motor_zero_vel_offset_range` | vel `[-0.01,0.01]` | 无已确认的 mjlab 1.6.0 内置等价 term | — | **声明但不生效**；候选不把 velocity bias 错接到 `dr.encoder_bias`，需自定义 adapter + 测试后才可启用 |
+| `randomize_motor_strength` | `[0.8,1.2]` | 输出 torque 后乘 per-env factor，再做 effort clip；`dr.effort_limits` 仅改变饱和上限 | `startup`/`reset` | 当前源码未接入；候选提供 `ScaledIdealPdActuator` + custom event，未运行证明 |
+| `randomize_obs_motor_latency` | `[1,4]` | 每个 `ObservationTermCfg.delay_min_lag/max_lag` | policy step | 当前未接入；候选 helper 已接到 joint pos/vel，未运行证明 |
+| `randomize_obs_imu_latency` | `[1,3]` | IMU `builtin_sensor` term 的 delay | policy step | 当前未接入；候选 helper 已接到 IMU terms，未运行证明 |
+| `randomize_cmd_action_latency` | `[1,4]` | `IdealPdActuatorCfg.delay_min_lag/max_lag`（physics lag）或单独 action queue（policy lag） | actuator 为 physics step；queue 为 policy step | 当前仅 Asset 有意图；候选已做 policy→physics 换算且 play 关闭，未运行证明 |
+
+关键单位规则：mjlab observation delay 使用 **policy step**；`IdealPdActuatorCfg.delay_min_lag/max_lag` 使用 **physics timestep**。当前 `dt=0.005`、decimation=4，因此 actuator `[1,4]` 是 5–20 ms，而不是 1–4 个 policy step；若目标是旧部署中的 1–4 policy steps，应换算为 physics lag `[4,16]` 或另加 policy-level action queue。动作会在每个 decimation physics substep 写入 actuator target。三个 IdealPd actuator group 若传入相同 delay 参数，当前实现会共享一个融合 delay buffer，不等于每个电机独立抽样。
+
+#### 安全硬门禁：动作、力矩、接触与失效路径
+
+以下内容不是“后续优化”，而是动作进入仿真或硬件前必须闭环的契约：
+
+| 契约 | 当前证据 | 文档候选实现的强制规则 | 放行条件 |
+|---|---|---|---|
+| 关节/动作顺序 | 当前配置 dict 按 `hip` 全组、`thigh` 全组、`calf` 全组插入；部署是 leg-major `FL, RL, FR, RR`；`go2.xml` runtime 是 leg-major `FL, FR, RL, RR` | 候选代码固定 policy/deployment 顺序为 `FL,RL,FR,RR` 且按每腿 `hip,thigh,calf`；四个 action term 显式分腿，禁止隐式依赖 dict 或 XML 全局顺序 | 用零动作、单位脉冲和 round-trip 映射逐关节证明 FL/RL/FR/RR 的 hip/thigh/calf 均一致 |
+| 力矩上限 | 当前仿真 hip/thigh/calf 为 `23.5/23.5/45 N*m`，部署为 `23.7/23.7/35.55 N*m` | 候选采用部署硬上限 `23.7/23.7/35.55`；输出必须先 finite 检查、硬 clip，再按硬件 effort limit clip | S12 回放确认策略输出、PD 输出和部署下发值均不超限 |
+| action clip | 当前源码使用不存在的旧字段 `control.action_clip`；mjlab `clip` 位于 scale/offset 后 | 候选按 `default_angle ± scale` 设置 target-space clip，且 `hip_reduction=.5` 使 hip scale 为 `.125`；wrapper/部署边界再对 raw action 做 `[-1,1]` finite/range 检查 | S5/S10/S12 均能捕获 NaN/Inf、越界和饱和动作 |
+| 延迟单位 | legacy `[1,4]` 被直接送入 physics actuator 的风险 | 明确 policy-step queue 与 physics-step actuator lag 的转换；play 默认关闭随机延迟与 hold | 用时间戳/脉冲输入验证实际延迟为预期毫秒数 |
+| 非法接触 | `terminate_after_contacts_on=[]`，旧 broad pattern 会匹配足端 | 非足端传感器只能列出 `base1/2/3`、四条腿的 `thigh`/`calf1/2`；四个 `*_foot_collision` 只进入足端传感器 | base 接触、危险碰撞和跌倒在一个 policy step 内 `terminated=True`，并停止后续危险动作 |
+| 初始姿态 | `base z=0.42` 与默认关节角尚未做落地验证 | reset 后必须测足端离地/穿透、零动作 settle 和第一步冲击；失败时不得打开 push/DR | S2/S4 记录姿态、足端高度、接触力和最大初始 impulse |
+| 控制器失效 | wrapper 有有限值检查，部署 FSM 尚无可证明 watchdog/安全停机链路 | 部署边界必须覆盖 NaN/Inf、通信超时、传感器断连和 checkpoint 输出异常 | 故障注入后进入定义好的安全停机状态，并留下可审计日志 |
+
+因此动作顺序、effort 上限、clip、延迟单位和安全停机均属于 **P0 blocker**；只要其中一项没有 round-trip 或故障注入证据，就不能把文档候选实现称为可部署实现。
+
+#### 其他 legacy 配置字段接线矩阵
+
+下面补齐 reward/DR 之外的配置字段。这里的“候选使用”只表示完整候选代码读取了该字段；在 S0–S18 运行证据出现前，仍不能把它标记为已生效。
+
+| 配置路径 | 当前/候选语义 | 状态 |
+|---|---|---|
+| `env.num_envs`、`env.env_spacing` | 传给 `SceneCfg` | 候选使用，未运行证明 |
+| `env.num_one_step_observations` | wrapper 的 45 维契约与 runner metadata | 候选固定为 45；应与字段交叉断言 |
+| `env.history_length`、`env.num_observations` | 6 帧由 `HIMRslRlWrapper` 生成 270；不进入 native group history | wrapper 使用；native manager 不读取 legacy 字段 |
+| `env.num_privileged_obs` | native critic 目标宽度 239 | 候选使用；当前源码声明/构造尚未闭环 |
+| `env.num_actions` | 12 维期望值 | 仅 metadata/验收；真实值应由 action manager 解析 |
+| `env.send_timeouts` | legacy runner timeout 元数据 | 外部 runner 读取与否需验证；不等价于 mjlab `truncated` |
+| `env.episode_length_s`、`env.seed` | manager episode length 与随机种子 | 候选使用，未运行证明 |
+| `terrain.mesh_type` | `plane` 或 `generator` 分支 | 候选使用 |
+| `terrain.horizontal_scale`、`vertical_scale` | height scan/terrain generator 分辨率 | 当前源码未接入；候选显式传入 raycast 和支持 heightfield 的 sub-terrain |
+| `terrain.border_size`、`terrain.terrain_length/width` | generator 的边界与尺寸 | 候选使用，未运行证明 |
+| `terrain.num_rows`、`num_cols` | generator 网格参数；curriculum 时列数受子地形类型影响 | 候选使用；不能宣称复现 legacy 五比例 |
+| `terrain.terrain_proportions` | legacy 五类地形比例 | 当前源码未被 mjlab 自动读取；候选将五个值显式映射为 `sub_terrains` |
+| `terrain.static_friction`、`dynamic_friction`、`restitution` | legacy terrain material 参数 | 当前候选未接入；特别是 restitution 没有确认的内置 DR term |
+| `terrain.slope_treshold` | legacy trimesh 可行走坡度阈值 | generator/plane 路径未使用；仅 trimesh 专用 |
+| `terrain.measure_heights`、`measured_points_x/y` | 是否启用 height scan 与 17×11 网格 | 候选使用；必须断言实际 ray 数为 187 |
+| `terrain.selected`、`terrain.terrain_kwargs` | legacy terrain 选择/透传字典 | 当前未使用；不能假设 manager 自动消费 |
+| `terrain.max_init_terrain_level` | `TerrainEntityCfg.max_init_terrain_level` | 候选使用，未运行证明 |
+| `commands.curriculum`、`max_curriculum` | legacy command curriculum | 当前候选只实现 terrain curriculum，command curriculum 未接入 |
+| `commands.num_commands` | legacy 写成 4（含 heading） | 不作为 manager 维度来源；`heading_command=False` 时实际是 3 |
+| `commands.resampling_time`、`heading_command`、`ranges.*` | `UniformVelocityCommandCfg` | 候选使用；标量时间必须转为二元组 |
+| `init_state.pos`、`default_joint_angles` | entity initial state 与 zero-action pose | 候选使用，但初始姿态/足端高度尚未验收 |
+| `control.control_type` | legacy P/V/T 标记 | 当前候选固定 `IdealPdActuatorCfg`；非 P 模式未实现 |
+| `control.stiffness`、`damping` | Ideal-PD actuator 参数 | 候选使用，未运行证明 |
+| `control.effort_limit` | actuator force limit | 当前源码为 `23.5/23.5/45`，部署为 `23.7/23.7/35.55`；候选按部署值对齐 |
+| `control.action_scale`、`hip_reduction`、`decimation` | action scale、hip scale、policy/physics 频率 | 候选使用 `0.25×0.5=0.125` 对齐部署 hip scale；必须做动作与时间 round-trip |
+| `asset.file`、`asset.name` | XML 路径与 Scene entity key | 候选使用，未运行证明 |
+| `asset.foot_name` | legacy 单一 foot 名称 | 当前 XML 有四个 `FL/FR/RL/RR` site/geom；该字段未直接使用 |
+| `asset.penalize_contacts_on` | legacy body 名称筛选 | 候选用显式 contact sensor 替代；字段自身不会自动注册 reward |
+| `asset.terminate_after_contacts_on` | legacy termination body 列表 | 当前为空且不满足安全终止；候选必须显式注册 base/危险碰撞/姿态终止 |
+| `asset.privileged_contacts_on` | legacy privileged contact 列表 | 候选用四足 contact + 187 height scan 组成 native critic；字段自身未被 manager 自动读取 |
+| `asset.self_collisions` | legacy bitwise collision 开关 | 当前实体 collision editor 未由该字段驱动；需显式核对 `CollisionCfg` |
+| `rewards.feet_stumble` | legacy reward scale，当前为 `-0.0` | 不会由字段名自动注册 stumble term | 声明存在但权重为零；当前/候选均无活动 term |
+| `rewards.soft_dof_vel_limit` | `1.0` | 没有已确认的自动映射；`rewards.scales.dof_vel_limits=-0.0` | **声明但不生效**；须先定义并验证 velocity-limit term，不能仅保留配置字段 |
+| `rewards.only_positive_rewards` | legacy 总 reward clamp | mjlab 不自动读取；当前源码未接入，候选在 `Env.step()` 的 reward 汇总后显式 clamp |
+
+结论：当前最容易造成错觉的字段是 `terrain_proportions`、terrain material 参数、`commands.curriculum`、`control.control_type`、`asset.*contacts`、`self_collisions`、`rewards.soft_dof_vel_limit`、`domain_rand.motor_zero_vel_offset_range` 和 `only_positive_rewards`。它们在配置文件里存在，并不意味着 mjlab manager 会自动使用；其中 `feet_stumble=-0.0` 还明确表示当前没有活动奖励项。
+
+### 9.3 官方 mjlab v1.6.0 规则清单
+
+官方 v1.6.0 tag 是提交 `0fb8a68`，发布说明明确包含 MuJoCo/MuJoCo-Warp 3.11、partial reset 修复、灯光/纹理视觉随机化、`GeomCfg`，以及三个迁移性 breaking changes：`CollisionCfg` 的 `contype/conaffinity/condim/priority` 必须显式设置；自定义 command 的 `_update_command` 增加 `env_ids`；`ViewerConfig` 改为 keyword-only。见 [v1.6.0 release](https://github.com/mujocolab/mjlab/releases/tag/v1.6.0)。
+
+实现时按以下顺序检查官方 API：
+
+1. `ManagerBasedRlEnvCfg` 是 flat dataclass；`decimation` 和 `scene` 是核心输入，manager 字典显式挂载。原生 `reset()` 返回 observation dictionary 与 extras，`step()` 返回 `(obs, reward, terminated, truncated, extras)`。
+2. `SceneCfg.entities` 的值是 `EntityCfg`；MJCF 可由 `MjSpec.from_file()` 加载，再在 Python 配置 actuator、collision、initial state 和 sensor。
+3. `SceneEntityCfg` 的目标选择字段是复数 `actuator_names`、`joint_names`、`body_names`、`geom_names`，并可 `preserve_order=True`；不能使用 `actuator_name`。
+4. observation pipeline 是 `compute → noise → clip → scale → delay → history`。actor noisy、critic clean 的 asymmetric 配置应分别建 group；原生 group history 在 HIM 方案中保持 `1`，6 帧由 `HIMRslRlWrapper` 维护。
+5. reward term 必须返回 `[N]`；负权重是 penalty。dt 是否缩放必须显式固定，不能把 legacy scale 和 mjlab 默认混用。
+6. command 是 class-based `CommandTerm`，`resampling_time_range` 为秒，reset 时必定 resample；标量 `10.0` 必须转换为 `(10.0,10.0)`。
+7. events 通过 `EventTermCfg(mode="startup"|"reset"|"interval"|"step", func=...)` 注册；domain randomization 不会因为 legacy `domain_rand` 类存在而自动执行。
+8. timeout 应注册为 `TerminationTermCfg(func=..., time_out=True)`，这样它进入 `truncated` 并允许 value bootstrap；跌倒/危险接触进入 `terminated`。
+9. RSL-RL task registry 的标准形态是 `register_mjlab_task(task_id, env_cfg, play_env_cfg, rl_cfg, runner_cls)`；当前项目自定义 registry 可以保留，但必须清楚说明它不是官方 registry。
+
+官方参考页：[architecture](https://mujocolab.github.io/mjlab/main/source/architecture_overview.html)、[environment config](https://mujocolab.github.io/mjlab/main/source/environment_config.html)、[observations](https://mujocolab.github.io/mjlab/main/source/observations.html)、[actions](https://mujocolab.github.io/mjlab/main/source/actions.html)、[rewards](https://mujocolab.github.io/mjlab/main/source/rewards.html)、[terminations](https://mujocolab.github.io/mjlab/main/source/terminations.html)、[commands](https://mujocolab.github.io/mjlab/main/source/commands.html)、[events](https://mujocolab.github.io/mjlab/main/source/events.html)、[domain randomization](https://mujocolab.github.io/mjlab/main/source/randomization.html)、[curriculum](https://mujocolab.github.io/mjlab/main/source/curriculum.html)、[RSL-RL](https://mujocolab.github.io/mjlab/main/source/training/rsl_rl.html)。这些页面的当前发布日期与 v1.6.0 tag 对齐到 2026-08-09；具体 breaking change 以 release 页为准。
+
+### 9.3.1 固定证据与可复现登记
+
+以下只登记固定来源与入口；`PASS` 仅表示静态来源/路径已核对，**静态核对≠运行通过**。
+
+| 证据项 | 状态 | 固定登记（HEAD、版本、入口） | 复现边界 |
+|---|---|---|---|
+| 当前项目 | `PASS` | `/home/kk/legged_mjlab` HEAD `cd993ee2936f18c18b44a554315097029a80a3cc` | 只固定源码锚点，不替代运行验证 |
+| `AMP_mjlab` | `PASS` | HEAD `6c7a2947fccc973e4af8e6d90e550400f1b6fcfc`；root setup pin：`mjlab==1.2.0`、`mujoco-warp==3.8.1`、`warp-lang==1.12.0`、`rsl-rl-lib==2.3.1`；注册 `src/tasks/amp_loco/config/g1/__init__.py:1-23`；runner `src/tasks/amp_loco/rl/runner.py:12,65-115` | 参考入口，不是当前 mjlab v1.6.0 运行证据 |
+| `unitree_rl_mjlab` | `PASS` | HEAD `1425b15f73bd4095f0df53709d7c389c3eb9e790`；pin：`mjlab==1.2.0`、`mujoco-warp==3.5.0`；Go2 注册 `src/tasks/velocity/config/go2/__init__.py:1-23` | 不是 v1.6 证据，只能作迁移组织参考 |
+| `HIMLoco` | `BLOCKED` | 无可验证 `.git` commit；`legged_gym==1.0.0`、本地 `rsl_rl==1.0.2`；训练入口 `legged_gym/legged_gym/scripts/train.py`，play 入口 `legged_gym/legged_gym/scripts/play.py:27-30` | play 在 `:29` 硬编码 checkpoint，来源与结果不可复现，风险未解除 |
+| `2027_RC_legged_robot` | `BLOCKED` | HEAD `37c83664418b27f552074d2e697d8ee3e72dd3eb`，工作树 dirty；root 包 `1.0.0`、本地 `rsl_rl==1.0.2`；实际 HIM reward 配置为 `legged_gym/envs/him_go1/him_go1_config.py` | dirty 快照不可作为干净复现基线 |
+| 2027 Go1 reward 路径核对 | `FAIL` | 用户给出的 `legged_gym/envs/legged_gym_go1/him_go1_config.py` 不存在；只能使用上方实际路径 | 禁止继续引用不存在的路径 |
+| 官方 v1.6.0 release | `PASS` | [固定 release](https://github.com/mujocolab/mjlab/releases/tag/v1.6.0)，对应 commit `0fb8a68` | release 是固定证据 |
+| 官方正文与安全入口 | `BLOCKED` | 正文使用 `https://mujocolab.github.io/mjlab/main/...` 滚动页面；补记 [recorders](https://mujocolab.github.io/mjlab/main/source/recorders.html) 与 [NaN guard](https://mujocolab.github.io/mjlab/main/source/debugging/nan_guard.html) | 滚动页不能声称固定到 v1.6.0；`NaN guard`/`nan_detection` 不是硬件 fail-safe；S18 为 `UNSAFE`，仍须完成 S18 |
+| 运行验证 | `NOT_RUN` | 本登记未运行 reset/step、训练、play 或部署检查 | 保留现有 9.9、9.10 与 S0-S18 结论；没有 `[ALL_TESTS_PASSED]` |
+
+```python
+import ast
+from pathlib import Path
+
+documented_groups = {'env', 'terrain', 'commands', 'init_state', 'control', 'asset', 'domain_rand', 'rewards', 'ppo'}
+class_to_group = {'HimGo2RoughCfg': 'env', 'HimGo2CfgPPO': 'ppo'}
+tree = ast.parse(Path('legged_mjlab/envs/him_go2/him_go2_config.py').read_text())  # source anchor: 8-226
+source_groups = set()
+
+def collect_class(node, parent_group=None):
+    group = class_to_group.get(node.name)
+    if node.name in documented_groups:
+        group = node.name
+    if group is None:
+        group = parent_group
+    if group is not None:
+        source_groups.add(group)
+    for item in node.body:
+        if isinstance(item, ast.ClassDef):
+            # Nested config classes inherit the top-level/parent group unless
+            # their own name is an explicit documented group anchor.
+            collect_class(item, group)
+
+for node in tree.body:
+    if isinstance(node, ast.ClassDef):
+        collect_class(node)
+missing_groups = documented_groups - source_groups
+print('group anchors:', sorted(source_groups), 'missing groups:', sorted(missing_groups))
+# This script only checks group anchors; it cannot reliably count inherited or
+# deduplicated leaf fields. Review all 130 leaf fields against the manual 9.2
+# table; do not treat this smoke check as a 130/130 runtime result.
+```
+
+这是文档覆盖的最小只读 smoke，不证明精确运行时字段语义、manager registration 或 runtime 生效。
+
+### 9.4 四个参考项目的边界
+
+| 项目 | 可复用模式 | 不能直接复制到本项目的部分 |
+|---|---|---|
+| `AMP_mjlab` | `ManagerBasedRlEnvCfg` 组装、`register_mjlab_task`、actor/critic/amp 三组、外部 AMP runner/ONNX | 该项目 pin `mjlab==1.2.0`；AMP observation 为 13 bodies×15=195，runner 将相邻两帧拼接为 390 维 discriminator 输入（不是 210 维）；`AMPPPO` 和 patch 后的 history ordering 不是 HIM-Go2 的 45/270/239 契约 |
+| `unitree_rl_mjlab` | `manager`、`terrain`、`reward` 的组织方式 | 参考仓库 pin `mjlab==1.2.0`、`mujoco-warp==3.5.0`；它不是当前 mjlab v1.6.0 的 API 证据，只能借鉴 manager/terrain/reward 组织；其标准 RSL runner 不是仓库内 `HIMOnPolicyRunner` |
+| `HIMLoco` | 6 帧 history、estimator 19 输出、terminal privileged obs、policy action 与 delayed executed action 的区分 | Isaac Gym tensor、七元 step 约定、硬编码 16 DOF/57 obs、C++ SDK/FSM 不能直接放入 mjlab manager |
+| `legged_gym_go1` | reward 数值基线是实际存在的 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/him_go1/him_go1_config.py`（用户指定的 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/legged_gym_go1/him_go1_config.py` 当前不存在）；普通 `legged_gym_go1_config.py` 仅作结构参考 | 动态 `_reward_<name>` 注册、奖励 dt 语义、domain_rand 字段命名仍属 legacy；Isaac Gym 的 `step()` 五元组、旧 terrain/safety 字段、Gym buffer 和动态属性不能直接作为 mjlab 1.6 term |
+
+关键证据：
+
+- AMP：任务注册 `/home/kk/github/AMP_mjlab/src/tasks/amp_loco/config/g1/__init__.py:10-15`；task runner `/home/kk/github/AMP_mjlab/src/tasks/amp_loco/rl/runner.py:65`；上游基类 `/home/kk/github/AMP_mjlab/rsl_rl/runners/amp_on_policy_runner.py:95`；配置（实际文件名为 `rl_cfg.py`，不是 `rsl_cfg.py`）`/home/kk/github/AMP_mjlab/src/tasks/amp_loco/config/g1/rl_cfg.py:79-94`；loader observation dim `/home/kk/github/AMP_mjlab/rsl_rl/utils/motion_loader.py:148-151`；discriminator 构造 `/home/kk/github/AMP_mjlab/rsl_rl/runners/amp_on_policy_runner.py:174-177`。
+- Unitree：pin 证据 `/home/kk/github/unitree_rl_mjlab/setup.py:6-9` 为 `mjlab==1.2.0`、`mujoco-warp==3.5.0`；`/home/kk/github/unitree_rl_mjlab/src/tasks/velocity/velocity_env_cfg.py:36-121,165-387,393-431` 与 Go2 `config/go2/env_cfgs.py:22-162` 仅作为 manager/terrain/reward 组织参考，不是当前 mjlab v1.6.0 API 证据。
+- HIM：history 顺序见 `/home/kk/github/HIMLoco/legged_gym/legged_gym/envs/go2w/go2w_legged_robot.py:51-52`；upstream estimator 的切片见 `/home/kk/github/HIMLoco/rsl_rl/rsl_rl/modules/him_estimator.py:76-84`；当前 wrapper 的 history 写入见 `/home/kk/legged_mjlab/legged_mjlab/wrappers/him_wrapper.py:161-180`，当前 estimator 的切片见 `rsl_rl/rsl_rl/modules/him_estimator.py:103-109`，runner 入口见 `rsl_rl/rsl_rl/runners/him_on_policy_runner.py:44-118`。
+- Go1：HIM reward 数值基线实际为 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/him_go1/him_go1_config.py:56-88`（用户指定的 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/legged_gym_go1/him_go1_config.py` 当前不存在）；普通 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/legged_gym_go1/legged_gym_go1_config.py:3-48` 仅作结构参考；`legged_gym/envs/base/legged_robot.py:1014-1043,1307` 只作 legacy 运行时结构证据。
+
+### 9.5 HIM 分层 shape 与默认决策
+
+不要在文档或代码中把下列数字写成同一层：
+
+```text
+native mjlab actor frame       [N, 45]
+HIM wrapper history             [N, 270] = 6 * 45
+native mjlab critic frame      [N, 239] = 45 + base_lin_vel(3) + foot_contact(4) + height(187)
+local HIM runner critic input  [N, 48]  = 45 + base_lin_vel(3)
+HIM estimator output           [N, 19]  = velocity(3) + latent(16)
+HIM actor network input        [N, 76]  = one_step_actor(57 in HIMLoco) + velocity(3) + latent(16)
+```
+
+最后一行是 HIMLoco 的参考契约，不是当前 Go2 的实际 actor input；当前本地 `HIMActorCritic` 应以 `HIMOnPolicyRunner` 构造参数和 wrapper 的 45/270 为准。保守默认是：**native env/wrapper 保留完整 239，当前 runner 继续显式取前 48 给 estimator/PPO；若要让 critic 网络学习额外 191 维，必须另开一项 runner/storage/网络接口变更，不能只改 `num_privileged_obs`。**
+
+timeout 的正确时序是：候选底层 env 设置 `auto_reset=False` 并直接保证真实 terminal critic → `step()` 返回该 frame → wrapper 只做断言/兼容并在捕获后 reset done env → 将 terminal critic 和 `truncated` mask 交给 runner → 非 timeout failure 不 bootstrap。mjlab 1.6.0 的 partial reset 修复正是为了避免 commands/history/interval timer 跨环境泄漏；不能先 auto-reset 再让 HIM wrapper 猜测，`termination_privileged_obs` 不能退化为 reset 后 observation。
+
+当前 HEAD 的 `rsl_rl/rsl_rl/modules/him_estimator.py:103-109` 已按本地目标契约使用 `next_critic_obs[..., :45]` 作为 target observation、`next_critic_obs[..., 45:48]` 作为 velocity target，即本地 layout 为 `[45 维 actor, 3 维 velocity]`。upstream HIMLoco 的 `/home/kk/github/HIMLoco/rsl_rl/rsl_rl/modules/him_estimator.py:76-84` 使用的是 `[3 维 base velocity, 45 维 actor]`，所以其 `vel` 仍是 `45:48`，但 `next_obs` 是 `3:48`。这不是矛盾，而是两套 layout 的切片约定不同；两套切片不能直接互换，本地实现不能改写成 upstream 的 `3:48`。仍需在 S10 保留回归断言，防止后续把本地 critic 前 48 维布局改回错误切片。
+
+### 9.6 完整代码实现清单（全部写在本文档，不修改源码）
+
+重要组合约定：第 4 节的 `him_go2_env.py` 环境候选与本节 B 的 `go2_asset.py` Asset 候选是同一套候选，必须整体落地，不能把现有源码和候选片段混用。当前源码的 `Go2Asset(cfg)` 仍不兼容 `play` 参数；只有整体落地候选 B 后，才能使用第 4 节中的 `Go2Asset(cfg, play=play)`，从而兑现 play 模式关闭延迟与随机化的契约。
+
+前文第 4 节的 `him_go2_env.py` 代码块是环境文件的完整候选实现；下面补足两个此前没有完整给出的文件。复制时必须以代码块整体替换目标文件，不能把 Markdown fence 复制到 Python；本轮不执行替换。
+
+#### A. `legged_mjlab/envs/him_go2/him_go2_config.py`
+
+~~~python
+"""Legacy-style configuration retained as the single input to the mjlab factory."""
+
+from legged_mjlab.envs.base.legged_mjlab_config import (
+    LeggedMjlabCfg,
+    LeggedMjlabCfgPPO,
+)
+
+
+class HimGo2RoughCfg(LeggedMjlabCfg):
+    class env(LeggedMjlabCfg.env):
+        num_envs = 4096
+        num_one_step_observations = 45
+        history_length = 6
+        num_observations = 270
+        num_privileged_obs = 239
+        num_actions = 12
+        env_spacing = 3.0
+        send_timeouts = True
+        episode_length_s = 20.0
+        seed = 42
+
+    class terrain(LeggedMjlabCfg.terrain):
+        mesh_type = "generator"
+        slope_treshold = 0.75  # legacy 字段仅适用于旧 trimesh 语义；当前 generator 候选不读取，矩阵中已标为未使用。
+        horizontal_scale = 0.1
+        vertical_scale = 0.005
+        border_size = 25.0
+        curriculum = True
+        static_friction = 1.0
+        dynamic_friction = 1.0
+        restitution = 0.0
+        terrain_length = 8.0
+        terrain_width = 8.0
+        num_rows = 10
+        num_cols = 20
+        terrain_proportions = [0.1, 0.1, 0.35, 0.25, 0.2]
+        measure_heights = True
+        measured_points_x = [
+            -0.8, -0.7, -0.6, -0.5, -0.4, -0.3, -0.2, -0.1, 0.0,
+            0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8,
+        ]
+        measured_points_y = [-0.5, -0.4, -0.3, -0.2, -0.1, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
+        selected = False
+        terrain_kwargs = None
+        max_init_terrain_level = 5
+
+    class commands(LeggedMjlabCfg.commands):
+        curriculum = True
+        max_curriculum = 1.0
+        num_commands = 4
+        resampling_time = 10.0
+        heading_command = False
+
+        class ranges:
+            lin_vel_x = [-1.0, 1.0]
+            lin_vel_y = [-1.0, 1.0]
+            ang_vel_yaw = [-1.0, 1.0]
+            heading = [-3.14, 3.14]
+
+    class init_state(LeggedMjlabCfg.init_state):
+        pos = (0.0, 0.0, 0.42)
+        rot = (1.0, 0.0, 0.0, 0.0)
+        default_joint_angles = {
+            "FL_hip_joint": 0.1,
+            "RL_hip_joint": 0.1,
+            "FR_hip_joint": -0.1,
+            "RR_hip_joint": -0.1,
+            "FL_thigh_joint": 0.8,
+            "RL_thigh_joint": 1.0,
+            "FR_thigh_joint": 0.8,
+            "RR_thigh_joint": 1.0,
+            "FL_calf_joint": -1.5,
+            "RL_calf_joint": -1.5,
+            "FR_calf_joint": -1.5,
+            "RR_calf_joint": -1.5,
+        }
+
+    class control(LeggedMjlabCfg.control):
+        control_type = "P"
+        stiffness = {"hip": 40.0, "thigh": 40.0, "calf": 40.0}
+        damping = {"hip": 1.0, "thigh": 1.0, "calf": 1.0}
+        # Match the deployment hard limits: hip/thigh 23.7 N*m, calf 35.55 N*m.
+        effort_limit = {"hip": 23.7, "thigh": 23.7, "calf": 35.55}
+        action_scale = 0.25
+        decimation = 4
+        # Deployment config.yaml uses hip_scale=0.125; with action_scale=.25,
+        # this explicit reduction keeps simulation and deployment aligned.
+        hip_reduction = 0.5
+
+    class asset(LeggedMjlabCfg.asset):
+        file = "{LEGGED_MJLAB_ROOT_DIR}/resources/robots/unitree_go2/xmls/go2.xml"
+        name = "go2"
+        foot_name = "foot"
+        penalize_contacts_on = ["thigh", "calf", "base"]
+        terminate_after_contacts_on = []
+        privileged_contacts_on = ["base", "thigh", "calf"]
+        self_collisions = 1
+
+    class domain_rand(LeggedMjlabCfg.domain_rand):
+        randomize_payload_mass = True
+        payload_mass_range = [-2.5, 2.5]
+        randomize_link_mass = True
+        link_mass_range = [0.9, 1.1]
+        randomize_com_displacement = True
+        com_displacement_range = [-0.05, 0.05]
+        randomize_joint_friction = True
+        joint_friction_range = [0.01, 1.15]
+        randomize_joint_damping = True
+        joint_damping_range = [0.3, 1.5]
+        randomize_joint_armature = True
+        joint_armature_range = [0.0001, 0.05]
+        randomize_friction = True
+        friction_range = [0.2, 1.3]
+        randomize_restitution = True
+        restitution_range = [0.0, 0.4]
+        push_robots = True
+        push_interval_s = 4.0
+        max_push_vel_xy = 1.0
+        randomize_pd_gains = True
+        stiffness_multiplier_range = [0.8, 1.2]
+        damping_multiplier_range = [0.8, 1.2]
+        randomize_motor_zero_offset = True
+        motor_zero_pos_offset_range = [-0.035, 0.035]
+        # Velocity encoder bias has no equivalent in the current built-in
+        # `dr.encoder_bias` term and is deliberately not silently applied.
+        motor_zero_vel_offset_range = [-0.01, 0.01]
+        randomize_motor_strength = True
+        motor_strength_range = [0.8, 1.2]
+        randomize_obs_motor_latency = True
+        range_obs_motor_latency = [1, 4]
+        randomize_obs_imu_latency = True
+        range_obs_imu_latency = [1, 3]
+        randomize_cmd_action_latency = True
+        range_cmd_action_latency = [1, 4]
+        action_hold_prob = 0.3
+
+    class rewards(LeggedMjlabCfg.rewards):
+        class scales:
+            termination = -0.0
+            tracking_lin_vel = 1.0
+            tracking_ang_vel = 0.5
+            lin_vel_z = -1.5
+            ang_vel_xy = -0.05
+            orientation = -0.2
+            dof_acc = -2.5e-7
+            joint_power = -2.0e-5
+            base_height = -1.0
+            foot_clearance = -0.01
+            action_rate = -0.01
+            smoothness = -0.01
+            feet_air_time = 0.1
+            collision = -0.5
+            feet_stumble = -0.0
+            stand_still = -1.0
+            torques = -0.0
+            dof_vel = -0.0
+            dof_pos_limits = -10.0
+            dof_vel_limits = -0.0
+            torque_limits = -1.0
+            hip_pos = -1.0
+
+        only_positive_rewards = True
+        tracking_sigma = 0.25
+        soft_dof_pos_limit = 0.85
+        soft_dof_vel_limit = 1.0
+        soft_torque_limit = 1.0
+        base_height_target = 0.30
+        max_contact_force = 100.0
+        clearance_height_target = -0.2
+
+
+class HimGo2CfgPPO(LeggedMjlabCfgPPO):
+    seed = 42
+    runner_class_name = "HIMOnPolicyRunner"
+
+    class policy(LeggedMjlabCfgPPO.policy):
+        policy_class_name = "HIMActorCritic"
+
+    class algorithm(LeggedMjlabCfgPPO.algorithm):
+        algorithm_class_name = "HIMPPO"
+        entropy_coef = 0.01
+
+    class runner(LeggedMjlabCfgPPO.runner):
+        policy_class_name = "HIMActorCritic"
+        algorithm_class_name = "HIMPPO"
+        num_steps_per_env = 100
+        max_iterations = 10000
+        save_interval = 500
+        experiment_name = "him_go2"
+~~~
+
+#### B. `legged_mjlab/envs/him_go2/go2_asset.py`
+
+~~~python
+"""Go2 MJCF entity factory.  This is a documentation-only replacement candidate."""
+
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+
+import mujoco
+import torch
+
+from legged_mjlab.utils.paths import PROJECT_ROOT
+from mjlab.actuator import ActuatorCmd, IdealPdActuator, IdealPdActuatorCfg
+from mjlab.actuator.pd_actuator import pd_torque
+from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
+from mjlab.sensor import (
+    ContactMatch,
+    ContactSensorCfg,
+    GridPatternCfg,
+    ObjRef,
+    RayCastSensorCfg,
+)
+from mjlab.utils.spec_config import CollisionCfg
+
+
+@dataclass(kw_only=True)
+class ScaledIdealPdActuatorCfg(IdealPdActuatorCfg):
+    """Ideal-PD actuator with a per-environment motor-strength factor."""
+
+    def build(self, entity, target_ids, target_names):
+        return ScaledIdealPdActuator(self, entity, target_ids, target_names)
+
+
+class ScaledIdealPdActuator(IdealPdActuator):
+    """Multiply the unclamped PD torque, then apply the nominal effort limit."""
+
+    def initialize(self, mj_model, model, data, device):
+        super().initialize(mj_model, model, data, device)
+        assert self.force_limit is not None
+        self.motor_strength = torch.ones_like(self.force_limit)
+
+    def reset(self, env_ids=None):
+        # Keep per-environment motor strength across partial resets.  The
+        # candidate event is registered in ``startup`` mode, matching the
+        # other model-field DR terms; resetting this tensor to one here would
+        # silently erase the sampled strength after the first episode reset.
+        super().reset(env_ids)
+        assert hasattr(self, "motor_strength")
+
+    def set_motor_strength(self, env_ids, strength):
+        if strength.ndim == 1:
+            strength = strength.unsqueeze(-1)
+        assert hasattr(self, "motor_strength")
+        self.motor_strength[env_ids] = strength
+
+    def compute(self, cmd: ActuatorCmd) -> torch.Tensor:
+        assert self.stiffness is not None
+        assert self.damping is not None
+        assert self.force_limit is not None
+        assert hasattr(self, "motor_strength")
+        torque = pd_torque(self.stiffness, self.damping, cmd)
+        if not bool(torch.isfinite(torque).all().item()):
+            raise FloatingPointError("PD torque contains NaN or Inf")
+        if not bool(torch.isfinite(self.force_limit).all().item()):
+            raise FloatingPointError("force_limit contains NaN or Inf")
+        if not bool(torch.isfinite(self.motor_strength).all().item()):
+            raise FloatingPointError("motor_strength contains NaN or Inf")
+        torque = torque * self.motor_strength
+        if not bool(torch.isfinite(torque).all().item()):
+            raise FloatingPointError("motor-strength-scaled torque contains NaN or Inf")
+        torque = torch.clamp(torque, -self.force_limit, self.force_limit)
+        if not bool(torch.isfinite(torque).all().item()):
+            raise FloatingPointError("clamped torque contains NaN or Inf")
+        return torque
+
+
+class Go2Asset:
+    def __init__(self, cfg, play: bool = False):
+        self.cfg = cfg
+        self.xml_path = self._resolve_xml_path(cfg.asset.file)
+        self.joint_names = tuple(cfg.init_state.default_joint_angles.keys())
+        self.effort_limit = cfg.control.effort_limit
+        self.stiffness = cfg.control.stiffness
+        self.damping = cfg.control.damping
+        self.armature = cfg.asset.armature
+        self.pos = cfg.init_state.pos
+        self.rot = cfg.init_state.rot
+        self.default_joint_angles = cfg.init_state.default_joint_angles
+        self.action_delay_min = 0
+        self.action_delay_max = 0
+        self.action_hold_prob = 0.0
+        if not play and cfg.domain_rand.randomize_cmd_action_latency:
+            # The legacy range is expressed in policy steps; mjlab actuator
+            # lag is expressed in physics steps.
+            decimation = int(cfg.control.decimation)
+            self.action_delay_min = int(
+                cfg.domain_rand.range_cmd_action_latency[0] * decimation
+            )
+            self.action_delay_max = int(
+                cfg.domain_rand.range_cmd_action_latency[1] * decimation
+            )
+            self.action_hold_prob = float(cfg.domain_rand.action_hold_prob)
+        self.entity = self._EntityFactory(self)
+        self.sensor = self._SensorFactory(self)
+
+    @staticmethod
+    def _resolve_xml_path(raw_path):
+        path = (
+            str(raw_path)
+            .replace("{LEGGED_MJLAB_ROOT_DIR}", str(PROJECT_ROOT))
+            .replace("{PROJECT_ROOT}", str(PROJECT_ROOT))
+        )
+        resolved = Path(path).expanduser().resolve()
+        if not resolved.is_file():
+            raise FileNotFoundError(f"Go2 MJCF file does not exist: {resolved}")
+        return resolved
+
+    @staticmethod
+    def _value(mapping_or_scalar, key):
+        if isinstance(mapping_or_scalar, Mapping):
+            return float(mapping_or_scalar[key])
+        return float(mapping_or_scalar)
+
+    class _EntityFactory:
+        def __init__(self, asset):
+            self.asset = asset
+
+        def get_spec(self):
+            return mujoco.MjSpec.from_file(str(self.asset.xml_path))
+
+        def actuators(self):
+            a = self.asset
+            delay = {
+                "delay_min_lag": a.action_delay_min,
+                "delay_max_lag": a.action_delay_max,
+                "delay_hold_prob": a.action_hold_prob,
+                "delay_update_period": 1,
+            }
+            return (
+                ScaledIdealPdActuatorCfg(
+                    target_names_expr=(r".*_hip_joint",),
+                    stiffness=self._value(a.stiffness, "hip"),
+                    damping=self._value(a.damping, "hip"),
+                    effort_limit=self._value(a.effort_limit, "hip"),
+                    armature=a.armature,
+                    **delay,
+                ),
+                ScaledIdealPdActuatorCfg(
+                    target_names_expr=(r".*_thigh_joint",),
+                    stiffness=self._value(a.stiffness, "thigh"),
+                    damping=self._value(a.damping, "thigh"),
+                    effort_limit=self._value(a.effort_limit, "thigh"),
+                    armature=a.armature,
+                    **delay,
+                ),
+                ScaledIdealPdActuatorCfg(
+                    target_names_expr=(r".*_calf_joint",),
+                    stiffness=self._value(a.stiffness, "calf"),
+                    damping=self._value(a.damping, "calf"),
+                    effort_limit=self._value(a.effort_limit, "calf"),
+                    armature=a.armature,
+                    **delay,
+                ),
+            )
+
+        def get_robot_cfg(self):
+            a = self.asset
+            foot_geoms = r"^(FL|FR|RL|RR)_foot_collision$"
+            collision = CollisionCfg(
+                geom_names_expr=(r".*_collision",),
+                contype=1,
+                conaffinity=0,
+                condim={foot_geoms: 3, r".*": 1},
+                priority={foot_geoms: 1, r".*": 0},
+            )
+            initial = EntityCfg.InitialStateCfg(
+                pos=a.pos,
+                rot=a.rot,
+                joint_pos=a.default_joint_angles,
+                joint_vel={r".*": 0.0},
+            )
+            articulation = EntityArticulationInfoCfg(
+                actuators=self.actuators(),
+                soft_joint_pos_limit_factor=float(a.cfg.rewards.soft_dof_pos_limit),
+            )
+            return EntityCfg(
+                init_state=initial,
+                collisions=(collision,),
+                spec_fn=self.get_spec,
+                articulation=articulation,
+            )
+
+        @staticmethod
+        def _value(mapping_or_scalar, key):
+            return Go2Asset._value(mapping_or_scalar, key)
+
+    class _SensorFactory:
+        def __init__(self, asset):
+            self.asset = asset
+
+        def foot_contact(self, entity_name):
+            return ContactSensorCfg(
+                name="feet_ground_contact",
+                primary=ContactMatch(
+                    mode="geom",
+                    pattern=(
+                        "FL_foot_collision", "RL_foot_collision",
+                        "FR_foot_collision", "RR_foot_collision",
+                    ),
+                    entity=entity_name,
+                ),
+                secondary=ContactMatch(mode="body", pattern="terrain"),
+                fields=("found", "force"),
+                reduce="netforce",
+                num_slots=1,
+                track_air_time=True,
+            )
+
+        def illegal_contact(self, entity_name):
+            return ContactSensorCfg(
+                name="nonfoot_ground_touch",
+                primary=ContactMatch(
+                    mode="geom",
+                    pattern=(
+                        "base1_collision",
+                        "base2_collision",
+                        "base3_collision",
+                        "FL_thigh_collision",
+                        "FR_thigh_collision",
+                        "RL_thigh_collision",
+                        "RR_thigh_collision",
+                        "FL_calf1_collision",
+                        "FL_calf2_collision",
+                        "FR_calf1_collision",
+                        "FR_calf2_collision",
+                        "RL_calf1_collision",
+                        "RL_calf2_collision",
+                        "RR_calf1_collision",
+                        "RR_calf2_collision",
+                    ),
+                    entity=entity_name,
+                ),
+                secondary=ContactMatch(mode="body", pattern="terrain"),
+                fields=("found", "force"),
+                reduce="maxforce",
+                num_slots=1,
+                history_length=4,
+            )
+
+        def height_scan(self, entity_name, debug_vis=False):
+            cfg = self.asset.cfg
+            return RayCastSensorCfg(
+                name="height_scan",
+                frame=ObjRef(
+                    type="body", name="base_link", entity=entity_name
+                ),
+                pattern=GridPatternCfg(
+                    size=(
+                        max(cfg.terrain.measured_points_x)
+                        - min(cfg.terrain.measured_points_x),
+                        max(cfg.terrain.measured_points_y)
+                        - min(cfg.terrain.measured_points_y),
+                    ),
+                    resolution=float(cfg.terrain.horizontal_scale),
+                ),
+                ray_alignment="yaw",
+                max_distance=2.0,
+                debug_vis=bool(debug_vis),
+            )
+~~~
+
+上述两个代码块仍然需要按第 10 节验证矩阵逐项验证，尤其是 `ScaledIdealPdActuator` 的非 fused 执行路径、delay 字段、`ContactMatch` pattern 解析、`CollisionCfg` dict pattern 和 `RayCastSensorCfg` 采样点数量；文档中的“完整”表示不再用 `pass`、省略号或未定义属性隐藏实现，不表示未经运行就已经通过 mjlab 构造。
+
+#### C. `legged_mjlab/scripts/play.py`
+
+~~~python
+"""Play a checkpoint with the configured HIM Go2 environment."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import torch
+
+
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be positive")
+    return parsed
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--task", default="him_go2")
+    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--device", default=None)
+    parser.add_argument("--num-envs", type=_positive_int, default=1)
+    parser.add_argument("--steps", type=_positive_int, default=1000)
+    parser.add_argument("--log-dir", default="logs/play")
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+    if not args.checkpoint.is_file():
+        raise FileNotFoundError(args.checkpoint)
+
+    # Importing the task registry also registers the environment.  Loading the
+    # project backend must happen before constructing the runner.
+    import legged_mjlab.envs  # noqa: F401
+    from legged_mjlab.utils.task_registry import load_project_rsl, task_registry
+
+    load_project_rsl()
+    spec = task_registry.get(args.task)
+    env, _ = task_registry.make_env(
+        args.task,
+        device=args.device,
+        play=True,
+        num_envs=args.num_envs,
+    )
+
+    try:
+        train_cfg = spec.train_cfg_cls().to_dict()
+        runner = task_registry.make_alg_runner(
+            args.task,
+            env,
+            train_cfg,
+            args.log_dir,
+        )
+        runner.load(str(args.checkpoint), load_optimizer=False)
+        policy = runner.get_inference_policy(device=args.device)
+
+        history, _ = env.reset()
+        expected = (args.num_envs, 270)
+        if tuple(history.shape) != expected:
+            raise RuntimeError(
+                f"HIM history shape mismatch: expected {expected}, "
+                f"got {tuple(history.shape)}"
+            )
+
+        for _ in range(args.steps):
+            with torch.inference_mode():
+                actions = policy(history)
+            if not bool(torch.isfinite(actions).all().item()):
+                raise FloatingPointError("inference produced NaN or Inf actions")
+            # Keep the normalized action boundary for this candidate script.
+            # This clamp is not a hardware fail-safe; deployment must reject
+            # non-finite values, suppress output, and supervise communications.
+            actions = torch.clamp(actions, -1.0, 1.0)
+            result = env.step(actions)
+            if not isinstance(result, tuple) or len(result) != 7:
+                raise RuntimeError(
+                    "HIM wrapper must return "
+                    "(history, critic, reward, done, infos, ids, terminal_critic)"
+                )
+            history, _, _, dones, _, _, _ = result
+            if not bool(torch.isfinite(history).all().item()):
+                raise FloatingPointError("environment returned NaN or Inf history")
+            if bool(torch.as_tensor(dones).all().item()):
+                break
+    finally:
+        env.close()
+
+
+if __name__ == "__main__":
+    main()
+~~~
+
+#### D. `legged_mjlab/test/test_env.py`
+
+~~~python
+"""Dependency-light HIM Go2 CPU smoke test.
+
+This deliberately uses assertions rather than pytest so that it can run in the
+minimal project environment.  It is a post-migration test, not a claim that the
+current unmodified source already passes.
+"""
+
+import torch
+
+
+def test_him_go2_cpu_smoke():
+    import legged_mjlab.envs  # noqa: F401
+    from legged_mjlab.utils.task_registry import load_project_rsl, task_registry
+
+    load_project_rsl()
+    env, _ = task_registry.make_env(
+        "him_go2",
+        device="cpu",
+        play=True,
+        num_envs=4,
+    )
+    try:
+        history, critic = env.reset()
+        assert tuple(history.shape) == (4, 270), history.shape
+        assert tuple(critic.shape) == (4, 239), critic.shape
+        assert bool(torch.isfinite(history).all())
+        assert bool(torch.isfinite(critic).all())
+
+        result = env.step(torch.zeros((4, 12), device=history.device))
+        assert isinstance(result, tuple) and len(result) == 7
+        history, critic, reward, done, infos, done_ids, terminal_critic = result
+        assert tuple(history.shape) == (4, 270), history.shape
+        assert tuple(critic.shape) == (4, 239), critic.shape
+        assert tuple(reward.shape) == (4,), reward.shape
+        assert tuple(done.shape) == (4,), done.shape
+        assert done_ids.ndim == 1
+        assert isinstance(infos, dict)
+        if terminal_critic is not None:
+            assert terminal_critic.shape[-1] == 239
+    finally:
+        env.close()
+
+
+if __name__ == "__main__":
+    test_him_go2_cpu_smoke()
+~~~
+
+#### E. `legged_mjlab/utils/exporter.py`
+
+~~~python
+"""TorchScript exporter for the local HIM actor and estimator."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import torch
+from torch import nn
+
+
+class HimInferenceModule(nn.Module):
+    """Expose only normalized history -> normalized action inference."""
+
+    def __init__(self, actor_critic: nn.Module):
+        super().__init__()
+        self.actor_critic = actor_critic.eval()
+
+    def forward(self, history: torch.Tensor) -> torch.Tensor:
+        raw_actions = self.actor_critic.act_inference(history)
+        finite = torch.isfinite(raw_actions)
+        clamped_actions = torch.clamp(raw_actions, -1.0, 1.0)
+        # Preserve NaN/Inf so export checks and deployment boundaries can
+        # reject them; clamping must not turn an invalid action into a valid one.
+        return torch.where(finite, clamped_actions, raw_actions)
+
+
+def export_him_policy(actor_critic, sample_history: torch.Tensor, output: Path):
+    if tuple(sample_history.shape[1:]) != (270,):
+        raise ValueError(
+            f"expected sample history [N,270], got {tuple(sample_history.shape)}"
+        )
+    if not bool(torch.isfinite(sample_history).all().item()):
+        raise FloatingPointError("sample history contains NaN or Inf")
+
+    module = HimInferenceModule(actor_critic).to(sample_history.device).eval()
+    with torch.inference_mode():
+        sample_action = module(sample_history)
+    if not bool(torch.isfinite(sample_action).all().item()):
+        raise FloatingPointError("policy produced NaN or Inf during export check")
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    scripted = torch.jit.trace(module, sample_history, check_trace=True)
+    scripted.save(str(output))
+    return output
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--task", default="him_go2")
+    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--device", default="cpu")
+    args = parser.parse_args(argv)
+    if not args.checkpoint.is_file():
+        raise FileNotFoundError(args.checkpoint)
+
+    import legged_mjlab.envs  # noqa: F401
+    from legged_mjlab.utils.task_registry import load_project_rsl, task_registry
+
+    load_project_rsl()
+    spec = task_registry.get(args.task)
+    env, _ = task_registry.make_env(
+        args.task,
+        device=args.device,
+        play=True,
+        num_envs=1,
+    )
+    try:
+        runner = task_registry.make_alg_runner(
+            args.task,
+            env,
+            spec.train_cfg_cls().to_dict(),
+            str(args.output.parent),
+        )
+        runner.load(str(args.checkpoint), load_optimizer=False)
+        history, _ = env.reset()
+        export_him_policy(
+            runner.alg.actor_critic,
+            history[:1],
+            args.output,
+        )
+    finally:
+        env.close()
+
+
+if __name__ == "__main__":
+    main()
+~~~
+
+这三个代码块仍是文档候选实现：`play.py` 依赖 checkpoint，`test_env.py` 依赖环境先通过 S0–S9。`exporter.py` 的 `HimInferenceModule` 先计算 `torch.isfinite(raw_actions)`，再由 `torch.where(finite, clamped_actions, raw_actions)` 只对有限元素采用 `[-1,1]` clamp；NaN/Inf 元素沿 `raw_actions` 分支原样传播。因此 `export_him_policy()` 的 export-time finite check 会拒绝样本输出中的非有限值；若导出模块在运行时产生 NaN/Inf，下游 deployment adapter 仍必须 reject 并抑制输出，exporter 本身不会把它们变成安全动作。
+
+该 exporter 只导出归一化 `[N,270] -> [N,12]` policy action，不负责硬件关节重排、PD scale、effort clip、通信 watchdog 或安全停机；clamp 和 export-time 静态检查都不是硬件 fail-safe。导出文件只有在 S12、S13、S14、S18 均有证据后才能交给部署链路。
+
+### 9.7 现有完整环境代码块的必要修正
+
+前文第 4 节代码在手工落地前必须再修正以下点：
+
+- `_build_terrain()` 的 generator 必须使用非空的 `ROUGH_TERRAINS_CFG.sub_terrains`；不能把 `terrain_proportions` 写在 legacy 配置里就期待 mjlab 自动读取。
+- `ContactSensorCfg` 的 `nonfoot_ground_touch` 必须排除四个足端 geom，否则 `collision` 会重复惩罚正常触地；候选代码已改为只列出 `base1/2/3`、四腿 `thigh`、四腿 `calf1/2` 的显式 XML 名称，不再依赖 broad pattern 或可选 `exclude` 字段。
+- 第 4 节完整候选的 `_build_terminations()` 必须保留 `time_out`、`bad_orientation`、`base_contact`，并新增 `nonfoot_contact`，复用 `illegal_contact`，传入 `params={"sensor_name": "nonfoot_ground_touch", "force_threshold": 10.0}`；否则 thigh/calf/base 接触仍然只会进入 `collision` reward，不会在同一 policy step 终止。由于 `nonfoot_ground_touch` 的显式列表也包含 `base1/2/3`，`base_contact` 与 `nonfoot_contact` 可能同时命中；保留这一重叠是安全冗余，验证只断言最终的 `terminated`/`truncated`，不引入未经确认的去重 API。
+- `randomize_restitution` 不应调用未在 v1.6.0 `dr` 表中确认存在的函数；先标为未接入或写有测试的自定义 adapter。
+- `num_privileged_obs=239` 是 native/wrapper 的完整观测宽度；当前 `HIMOnPolicyRunner` storage/network 仍是 48，shape 测试必须同时断言 `(239,48)` 两层，不得只断言 239。
+- 候选 `ManagerBasedRlEnvCfg.auto_reset` 必须显式设置为 `False`。底层先返回/保留真实 terminal frame，`HIMRslRlWrapper` 只能断言 frame/shape/索引并做兼容适配，确认捕获后才 reset done env；wrapper 不可依赖底层先 auto-reset，也不可从 reset 后 observation 猜测 terminal frame。若 `auto_reset=False` 后底层不提供真实 terminal frame，应停止训练。
+- 当前源码 `HimGo2Env.__init__` 的参数名仍与 registry 不匹配；第 4 节候选实现已统一为 `device=None, render_mode=None`，但本轮不改源码，因此落地后仍需重新跑 S1/S2。
+- `go2.xml` 的 runtime actuator 数量为 0，12 个 actuator 由 `IdealPdActuatorCfg` 补建；不要把 `scene_go2.xml` 的 12 个 motor 与同一套 IdealPd actuator 同时使用。
+- 当前 `go2.xml` 的有效足端 site/geom 名称是 `FL/FR/RL/RR` 与 `FL_foot_collision/FR_foot_collision/RL_foot_collision/RR_foot_collision`；`foot_name="foot"` 只是 legacy 字段，并没有对应单一实体。
+- 当前配置的 `default_joint_angles` 是按关节类型分组的插入顺序（每组为 FL、RL、FR、RR），部署数组是按腿交错的 FL、RL、FR、RR，而 XML runtime 是按腿交错的 FL、FR、RL、RR；候选代码必须通过 `_joint_names()` 与四个分腿 action term 固定策略顺序，并记录到硬件重排表。
+- `randomize_motor_strength` 若要保持 HIMLoco/legged_gym 语义，必须在 torque 输出后乘 per-env strength factor 再做 effort clip；候选代码已在文档 B 中提供 `ScaledIdealPdActuator` 与 custom event，`dr.effort_limits` 仅随机化饱和上限，不是同一语义。
+- 文档 B 的 `ScaledIdealPdActuator` 候选已写入 finite guard：PD torque、`force_limit`、`motor_strength`、缩放后 torque 和 clamp 后 torque 均检查 NaN/Inf；这些只是候选代码的静态保护/局部检查，不能替代 runtime S14，也不构成部署硬件 fail-safe。
+- 文档 E 的 exporter 候选通过 `torch.where` 对有限 action 做 clamp、对 NaN/Inf 沿 `raw_actions` 原值传播，并在 export-time 检查中拒绝非有限样本；这是静态候选保护，不能替代部署 adapter 的 runtime finite reject、输出抑制、watchdog 或安全停机。
+- push event 必须显式传 `asset_cfg=SceneEntityCfg(entity_name)`；mjlab 的默认实体名是 `robot`，而本任务实体名是 `go2`。候选代码已补齐该参数。
+- `play=True` 必须同时关闭 startup DR、push、observation delay、actuator delay、action hold 和随机 reset 位姿；候选代码通过 fixed reset ranges、early return 与 `Go2Asset(cfg, play=play)` 共同保证，仍需 S17 运行验证。
+- `randomize_restitution` 当前没有已确认的 mjlab 1.6.0 内置 `dr` term；不得把 friction、solref 或 solver 参数当作 restitution 的等价实现。
+
+### 9.8 本轮证据边界
+
+下面区分“文档候选的局部验证”和“当前项目的真实运行验证”，两者不能互换：
+
+| 对象 | 已观察证据 | 不能推出的结论 |
+|---|---|---|
+| Markdown Python 代码块 | 11 个 Python fence 均可由 AST 解析 | 不等于项目源码已经替换或可运行 |
+| 文档 B 的 Asset 候选 | 在内存中用当前 `go2.xml` 构造出 12 joints、12 actuators，三个 actuator group 均为 `ScaledIdealPdActuator` | 不等于完整 `ManagerBasedRlEnv` reset/step 已通过 |
+| 文档环境候选 | synthetic cfg 的 `ManagerBasedRlEnvCfg` 构造成功；play 模式 events 只有固定 reset；17 个非零 reward term、四个 action key、hip scale `0.125`、clean critic 和五类 terrain 映射符合预期 | 不等于当前 registry、当前配置类和当前源码入口已通过 |
+| 文档候选 reward/termination terms | 用纯 Tensor 假对象调用后，已覆盖的 term 均返回有限 `[N]` 输出 | 不等于真实接触传感器、history、manager 调度和奖励数值语义已通过 |
+| 文档环境候选的 `auto_reset`/wrapper 终止帧 | 静态检查确认 `ManagerBasedRlEnvCfg.auto_reset=False`；wrapper 只断言/兼容真实 terminal frame，捕获后才 reset done env | 不等于底层 runtime terminal frame、partial reset 和 timeout bootstrap 已验证；不能依赖先 auto-reset，也不能替代 runtime S14/S17/S18 |
+| 文档 B 的 custom actuator finite guard | 静态检查确认 PD torque、`force_limit`、`motor_strength`、缩放后 torque 和 clamp 后 torque 均有 finite guard；最小测试确认执行顺序为 `PD torque × motor_strength → effort clip` | 只是静态候选保护；不等于每个 physics substep 或 deployment adapter 的 finite reject、输出抑制和安全停机已验证，不能替代 runtime S14/S17/S18 |
+| 文档 E 的 exporter finite/传播边界 | 静态检查确认有限 action 才走 clamp，NaN/Inf 经 `torch.where` 沿 `raw_actions` 原值传播，export-time check 会拒绝非有限样本 | 只是静态候选保护；不等于导出运行时或部署故障注入已验证，不能替代 runtime S14/S17/S18 |
+| 1-env CPU 尝试 | 把 Warp kernel cache 指向 `/tmp` 后进入 CPU kernel 编译；当前环境报告无 CUDA driver | 没有得到 reset/step 的 `[N,45]`/`[N,239]` 运行断言，S4/S5 仍未通过 |
+| 现有 CPU shape smoke test（第 6.3 节） | 只执行 `reset()` 与 `step(zeros)` 的 shape/返回值检查，未注入接触 | 不能证明 `nonfoot_ground_touch` 的 thigh/calf/base 终止路径；后续必须分别注入 thigh、calf、base 接触并断言 `terminated=True`、`truncated=False`，另行触发 timeout 并断言 `terminated=False`、`truncated=True` |
+| 当前工作树 | `git diff --name-only -- '*.py'` 为空；`him_go2_env.py:83` 仍是 `recorders = ,` | 不能 import 当前 `him_go2`，也不能触发 `[ALL_TESTS_PASSED]` |
+
+`auto_reset=False`、custom actuator finite guard 和 exporter 的 `torch.where`/export-time finite check 目前都只有静态候选保护证据；它们不能替代 runtime S14、S17、S18，也不能把 clamp 或静态检查解释为硬件 fail-safe。
+
+因此本轮新增的是文档候选的局部构造证据和更精确的阻断记录，不是项目运行绿灯。
+
+## 9.9 通用参考项目迁移契约
+
+本节只定义可复用边界，不把参考项目代码或版本当作当前实现证据；最终接口以本节契约为准。
+
+| 真实路径 | 唯一可复用边界 |
+|---|---|
+| `/home/kk/github/AMP_mjlab` | mjlab 1.2.0、AMP group/外部 runner；仅借鉴组织方式，不直接搬 manager API。 |
+| `/home/kk/github/unitree_rl_mjlab` | 该参考仓库明确 pinned `mjlab==1.2.0`、`mujoco-warp==3.5.0`；只借鉴 mjlab manager、Go2 terrain/contact/reward 语义，仍须按当前版本逐项核验。这两个 pin 属于参考仓库，不是当前 mjlab v1.6.0 的版本或 API 证据。 |
+| `/home/kk/github/HIMLoco` | HIM estimator/history/action/deployment；不直接提供 mjlab manager。 |
+| `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/legged_gym_go1` | legacy config/reward dt/order；不直接搬 manager API。 |
+
+**唯一目标契约：**
+
+| 边界 | 固定契约 |
+|---|---|
+| 迁移形态 | `legacy cfg → builder`，字段映射必须可追溯。 |
+| shape | action 12；actor 45；native critic 239；wrapper history 270；runner estimator 48。 |
+| 数值 | `torch.float32`，`device=env.device`，单位为 `m/rad/m/s/N·m`。 |
+| 顺序 | `_joint_names()` 返回 `FL,RL,FR,RR × hip/thigh/calf`，再由四个分腿 action term 固定策略动作顺序；禁止依赖 dict 或 XML 隐式顺序。 |
+| 生命周期 | 明确区分 `reset`、`terminated`、`truncated`，并提供 terminal critic。 |
+
+契约状态：当前源码的 action 顺序仍受按关节类型分组的顺序影响，且 `_build_actions` 仍是旧的 `actuator_name` 接口，尚未满足上述 canonical order 契约；当前状态为 `BLOCKED`。原因同时包括源码契约未满足，以及 S13 action round-trip 当前为 `NOT_RUN`。只有文档候选整体落地并跑完 S13 action round-trip，才允许将该项标记为 `PASS`。本次只修改本文档，不修改源码。
+
+当前 `num_privileged_obs=235` 只是 legacy metadata；candidate `239` 才是 native/wrapper 目标。235 与 239 不可混淆：前者不能证明 native/wrapper shape，后者也不能反写成当前运行已通过。
+
+#### 参考 reward 语义差异
+
+| reward | 候选选择 | 参考来源 | 状态 |
+|---|---|---|---|
+| `only_positive_rewards` | `super().step()` 后对汇总 reward 执行 `clamp_min(0)` | legacy `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/base/legged_robot.py:1299-1305` 先 clamp、再追加 termination reward；该顺序需 runtime 决策 | `NOT_RUN` |
+| `feet_air_time` | 沿候选/Unitree：threshold `0.4`，single-stance 后取 mode time 的 `min` | Unitree `/home/kk/github/unitree_rl_mjlab/src/tasks/velocity/mdp/rewards.py:134-159`；legacy Go1 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/base/him_legged_robot.py:1555-1566` 为 `0.5`、first-contact 后按 per-foot 累加 | `NOT_RUN` |
+| `collision` | candidate contact sensor `history_length=4`；对各 physics substep 的 `force_history` 先按接触项聚合，再按历史槽计数；`max_contact_force=100` 仅为候选策略值 | candidate `/home/kk/legged_mjlab/docs/him_go2_env_续写与外部_rsl_rl_接入.md:292-305,643-674,1226-1234`；legacy Go1 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/base/him_legged_robot.py:1532-1534` 使用当前接触力且阈值 `>0.1`；Unitree `/home/kk/github/unitree_rl_mjlab/src/tasks/velocity/mdp/rewards.py:87-106` 的默认 `self_collision` 阈值为 `10` | `NOT_RUN` |
+| `stand_still` | 关节误差的平方 L2 范数/平方和，并含 `xy` 速度与 yaw 速度的 gate | legacy Go1 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/base/him_legged_robot.py:1573-1575` 为 L1，且只使用 `xy` gate | `NOT_RUN` |
+| `hip_pos` | 相对 default pose 的平方 L2 范数/平方和，无 command gate | legacy Go1 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/base/him_legged_robot.py:1581-1583` 为 zero-target，并带 command gate | `NOT_RUN` |
+| `foot_clearance` | candidate 使用 world/site height（`site_pos_w[..., 2]`）、world/site 水平速度（`site_lin_vel_w[..., :2]`）、高度绝对误差，并带 command gate | candidate `/home/kk/legged_mjlab/docs/him_go2_env_续写与外部_rsl_rl_接入.md:394-416`；Unitree `/home/kk/github/unitree_rl_mjlab/src/tasks/velocity/mdp/rewards.py:163-185`；legacy HIM Go1 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/base/him_legged_robot.py:1503-1514` 使用 body-frame、relative-to-root 的高度/速度、平方高度误差且无 gate | `NOT_RUN` |
+| `dof_acc` | candidate 直接注册 mjlab `joint_acc_l2` | candidate `/home/kk/legged_mjlab/docs/him_go2_env_续写与外部_rsl_rl_接入.md:1161-1166`；legacy HIM Go1 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/base/him_legged_robot.py:128,1490-1492` 用相邻 policy-step 的 velocity difference 除以 `self.dt`，时间离散不同 | `NOT_RUN` |
+| `torque_limits` | candidate 对归一化超限量取平方后求和 | candidate `/home/kk/legged_mjlab/docs/him_go2_env_续写与外部_rsl_rl_接入.md:448-471,1268-1276`；legacy HIM Go1 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/base/him_legged_robot.py:1551-1553` 对原始 torque 超限量作线性和 | `NOT_RUN` |
+
+状态枚举仅允许 `PASS/FAIL/BLOCKED/NOT_RUN/UNSAFE`。
+
+- `PASS` 仅表示该项证据已完成且满足契约。
+- `FAIL`、`BLOCKED`、`NOT_RUN`、`UNSAFE` 都不是放行状态。
+- 若任一上游依赖失败，所有下游依赖项禁止标记为 `PASS`，只能标为 `BLOCKED` 或 `NOT_RUN`；修复根因后必须重新运行整条依赖链。
+
+迁移 checklist（8 项）：
+
+1. **版本与 commit**：记录四个参考路径的实际存在性、版本、commit，以及当前工作树 commit。
+2. **字段映射**：逐项核对 legacy cfg → builder，含 dt、scale、命令、terrain、DR 和 timeout 语义。
+3. **asset**：核对 XML、12 joints/actuators、sensor/site/geom 名称、effort limit，以及由 `_joint_names()` 与四个分腿 action term 固定的策略顺序。
+4. **manager**：构造 scene、action、observation、critic、reward、event、termination manager，并记录字段来源。
+5. **CPU reset/step**：在 CPU 上验证 reset、zero-action step、partial reset 及 45/239/270/48 shape 和 finite。
+6. **reward/DR**：核对 reward dt 缩放、非零项、接触与 terrain 语义，以及 play 关闭 DR/push/delay。
+7. **action/runner**：验证 12 维动作 round-trip、力矩/clip/顺序、HIM history、48 维 estimator 与 terminal critic。
+8. **play/export/fail-safe**：验证 play、export、NaN/Inf、越界、通信超时、断连和安全停机；未完成不得部署。
+
+P1 安装入口矛盾必须单独记录：根 `setup.py`、`docs/uv使用.md` 的 `uv sync`，但根目录无 `pyproject.toml`/lock；在入口统一前不得把安装成功当作环境证据。
+
+每次验证必须记录 Python 版本、Torch 版本、CUDA 版本、driver 状态，以及 `mjlab.__file__`、`mujoco_warp.__file__`、`rsl_rl.__file__`；缺一项就不能把环境标为 `PASS`。
+
+### 9.10 当前工作树启动/部署安全审计
+
+以下审计以当前工作树为准；状态字段只表示当前证据，不把文档候选实现、静态检查或未运行步骤写成已实现/已放行。
+
+| 审计项 | 状态 | 当前事实 | 证据（真实相对路径:行号） |
+|---|---|---|---|
+| 安装入口与依赖来源 | `FAIL` | 根 `setup.py` pin 了 `mjlab==1.6.0`、`mujoco-warp==3.11.0`，同时把仓库内 `rsl_rl` 纳入根包；独立 `rsl_rl/setup.py` 也分发同名 `rsl_rl`。`docs/setup.md` 连续安装 `./rsl_rl` 与 `.`。`docs/uv使用.md` 要求根 `pyproject.toml`/`uv sync`，但当前根目录没有 `pyproject.toml`、`uv.lock` 或 `requirements/`，因此安装入口不可复现。 | `setup.py:7-26`；`rsl_rl/setup.py:3-15`；`docs/setup.md:23-32`；`docs/uv使用.md:79-100`；`pyproject.toml`、`uv.lock`、`requirements/`：不存在（无文件行号） |
+| task registry 与环境构造 | `FAIL` | registry 传 `device`，当前 `HimGo2Env` 构造仍接收 `sim_device`，且 `render_mode` 无默认值；按当前调用会在进入有效环境前失败。 | `legged_mjlab/utils/task_registry.py:201-212`；`legged_mjlab/envs/him_go2/him_go2_env.py:41-60` |
+| 当前源码可解析性 | `FAIL` | `ManagerBasedRlEnvCfg` 构造中的 `recorders = ,` 是语法错误；不能据此宣称 import、reset 或 step 已通过。 | `legged_mjlab/envs/him_go2/him_go2_env.py:65-85`，尤其 `:83` |
+| play/export 入口 | `FAIL` | `play.py` 为空文件（0 行、0 bytes）；`exporter.py` 仅含 1 个空行（1 byte），当前没有可执行回放或导出入口。 | `legged_mjlab/scripts/play.py:0（空文件）`；`legged_mjlab/utils/exporter.py:1（空行）` |
+| 运行环境与 CPU gate | `BLOCKED` | `nvidia-smi` 当前报告无法与 NVIDIA driver 通信；CPU `reset()`/`step()` 本轮未运行，不能形成 shape/finite 证据。 | `nvidia-smi` 当前输出；`docs/him_go2_env_续写与外部_rsl_rl_接入.md:2806` |
+| 配置声明与实际实现 | `FAIL` | 配置打开了 motor-strength、观测/动作 delay 等随机化，并声明了 termination/reward 项；源码对 payload 随机化仍为 `pass`，资产只创建普通 `IdealPdActuatorCfg`，终止管理器实际只返回 timeout，未落地声明的接触/故障终止。 | `legged_mjlab/envs/him_go2/him_go2_config.py:151-168,174-205`；`legged_mjlab/envs/him_go2/him_go2_env.py:270-272,437-447`；`legged_mjlab/envs/him_go2/go2_asset.py:127-164` |
+| play 隔离 | `BLOCKED` | `play` 虽进入环境构造，但 manager builder 调用 `_build_events()`、`_build_observations()`、`_build_curriculum()` 时未传 `play`，与这些函数的签名不一致；不能证明 play 已关闭 DR、push、noise、delay、hold 和 curriculum。 | `legged_mjlab/envs/him_go2/him_go2_env.py:62-83,216,398,449` |
+| wrapper finite check 的安全边界 | `UNSAFE` | wrapper 只在收到动作后以 `FloatingPointError` 拒绝 NaN/Inf；这不是硬件 fail-safe，也没有证明输出抑制、通信监督或安全停机。 | `legged_mjlab/wrappers/him_wrapper.py:210-228,388-397` |
+| 仿真/部署 effort 一致性 | `FAIL` | 仿真配置 calf effort 为 `45 N·m`，部署 YAML 的 calf torque limit 为 `35.55 N·m`，两者不一致。 | `legged_mjlab/envs/him_go2/him_go2_config.py:77-84`；`deploy/deploy_mujoco/him_go2/policy/config.yaml:31-34` |
+| 部署 fail-safe 基础设施 | `UNSAFE` | 当前没有 communication watchdog、sensor-disconnect handling、output suppression、safe-stop 或可审计故障记录；没有部署放行证据。 | `deploy/deploy_mujoco/him_go2/src/library/fsm/fsm.py:1-164`（仅为通用 FSM，未提供上述链路）；`deploy/deploy_mujoco/him_go2/policy/config.yaml:1-54`；全树关键字核验无对应实现 |
+| 文档候选代码边界 | `NOT_RUN` | 第 4 节候选环境、full exporter、custom actuator 和 contact termination 只是待落地方案；候选代码、静态 finite guard 或文档 smoke test 均不能改写为当前源码已实现。 | `docs/him_go2_env_续写与外部_rsl_rl_接入.md:2412-2414,2654-2656,2664,2672-2674,2690-2691` |
+
+阻断清单：
+
+- `BLOCKED`：安装入口必须先统一根 `setup.py`、独立 `rsl_rl/setup.py` 与 `uv` 文档的唯一来源；在根项目元数据缺失且存在同名分发冲突时，不得启动训练或部署。
+- `FAIL`：必须先修复当前 `HimGo2Env` 的参数契约与 `recorders` 语法错误；本节不修改源文件。
+- `NOT_RUN`：CPU reset/step、S14 effort/finite safety、S16 termination latency、S17 play isolation、S18 deploy fail-safe 均没有当前运行证据；其中 S14、S16、S17、S18 只能标为 `NOT_RUN` 或 `BLOCKED`，不能标为 `PASS`。
+- `UNSAFE`：在补齐 finite reject、输出抑制、通信 watchdog、传感器断连处理、安全停机和可审计故障记录，并统一 calf effort 上限前，禁止把任何 exporter/actuator 候选或 clamp 当作硬件 fail-safe。
+
+### 9.10.1 文档质量与待核验补充
+
+9.1/9.2 是叙述性状态，严格的单值枚举仅适用于 9.3.1、9.9、9.10。`docs/setup.md:27-32,36-45` 的 shell fence 误标为 Python，属于文档质量 `FAIL`；本文 11 个 candidate Python fence 虽已通过 AST 解析，仍不代表源码可运行。collision candidate 的 `force_history` slot/contact-item 轴及 `any(dim=...)` 的物理时间聚合，必须在真实 `ContactSensor` 的 S6/S14 runtime 中核验，状态为 `NOT_RUN`；`torque_limits` candidate 读取的是已限幅的 `actuator_force`，因此 `soft_torque_limit=1.0` 的惩罚有效性也必须 runtime 核验，状态为 `NOT_RUN`。130/130 字段验证仅是文档覆盖率，不是 runtime 生效；最小只读核对沿用现有 9.2 矩阵，并逐项对照 `him_go2_env.py:8-226`。本补充不改变 `[ALL_TESTS_PASSED]` 缺失、S0 `FAIL` 及所有 runtime 阻断状态。
+
+## 10. 最终验证矩阵与阻断规则
+
+| 阶段 | 检查 | 预期证据 | 失败处理 |
+|---|---|---|---|
+| S0 | `python -m py_compile` 目标 Python 文件 | 无 SyntaxError | 修复文档候选代码；当前源码已知失败 |
+| S1 | `import legged_mjlab.envs` | task 注册成功 | 检查 `recorders`、循环 import、rsl 来源 |
+| S2 | `Go2Asset(cfg)` + `MjSpec.from_file` | XML、joint、actuator、sensor 名称解析成功 | 对照 `go2.xml:41-159`；禁止猜名 |
+| S3 | manager config build | `integrator` 是字符串，gravity 是三元组，非空 terrain | 检查所有 builder 参数和 v1.6 dataclass 字段 |
+| S4 | 4 env CPU `reset()` | actor `[4,45]`、native critic `[4,239]` | 检查 term 顺序/传感器匹配 |
+| S5 | 4 env CPU `step(zeros)` | history `[4,270]`、critic `[4,239]`、reward `[4]`、terminated/truncated `[4]` | 检查 action dim、finite、dt |
+| S6 | reward audit | 非零 scale 全部出现在 manager，零 scale 不出现；每项输出 `[4]` | 逐项补 term 或明确禁用 |
+| S7 | event audit | startup/reset/interval 事件按 flag 生效，play 关闭 push/DR | 检查 model field 与随机化前后差异 |
+| S8 | partial reset | 只 reset done env，其他 env 的 command/history/timer 不变 | 这是 v1.6 partial-reset gate |
+| S9 | HIM adapter | wrapper 返回 239，runner 显式消费 48，terminal obs 只替换 done 行 | 任何 silent truncate 都是 blocker |
+| S10 | one-iteration HIM PPO | estimator/optimizer/storage 无 shape 或 NaN 错误 | 先确认 `rsl_rl.__file__` 是项目 backend |
+| S11 | play | `play=True` 无 curriculum/push/noise，checkpoint 可加载 | 当前 `play.py` 为空，未通过前不能宣称可回放 |
+| S12 | export/deploy | 导出输入维度、joint order、action scale/clip/delay 与部署一致 | 当前没有 Go2 HIM 的已验证导出 artifact |
+| S13 | action round-trip | policy/deploy canonical joint order 与 XML runtime actuator/joint 映射逐关节一致；零动作和单位脉冲均落到预期电机 | 任一腿/关节错位都是 Critical blocker |
+| S14 | effort/finite safety | exporter/actuator 的静态 finite guard 已存在；runtime 仍须证明每个 physics substep 的 torque/action 无 NaN/Inf，仿真与部署 effort clip 一致，calf 不超过 `35.55 N*m` | 静态 guard 或 clamp 不能写成硬件 fail-safe；部署 adapter 仍须 finite reject 并抑制非有限输出，任一越界或 runtime finite 检查缺失都不放行 |
+| S15 | reset/settle | 记录 `base z`、四足高度、接触力、第一步 impulse；零动作 settle 不穿透、不异常弹跳 | 失败则关闭 push/DR，回到初始姿态修正 |
+| S16 | termination latency | 第 6.3 节 smoke test 不能证明该路径；后续必须分别注入 thigh、calf、base 接触，每次都断言一个 policy step 内 `terminated=True` 且 `truncated=False`，并确认不再执行危险动作；另行触发 timeout，断言 `terminated=False` 且 `truncated=True` | 未完成接触注入与 `terminated`/`truncated` 分别断言，或把 timeout 当作 failure termination，均是 blocker |
+| S17 | play isolation | `play=True` 明确关闭 push、DR、noise、随机延迟、action hold、curriculum，并固定 reset 位姿 | 任一随机化残留都不得用于部署回放结论 |
+| S18 | deploy fail-safe | exporter/actuator 的静态保护已存在，但仍须对 NaN/Inf、通信超时/断连、传感器断连/故障和 checkpoint 输出异常做故障注入；deployment adapter 必须 finite reject、抑制输出、运行 watchdog，并进入安全停机、记录原因 | 缺少 finite reject、输出抑制、watchdog、断连/传感器故障注入或可审计的安全停机日志，S18 失败；exporter/actuator 静态保护或 clamp 不得当作硬件 fail-safe |
+
+本轮没有执行上述运行验证，也没有触发 `[ALL_TESTS_PASSED]`。因此项目当前仍停在“文档化实现候选 + 静态审计”阶段，不能发布为可训练版本。
+
+验证状态勘误：测试节点曾在临时注释 `recorders` 的工作树上观察到 S1/S2/loader 的局部通过；该临时源码改动已恢复为原始 `recorders = ,`，因此以当前工作树为准，S0/S1/S2 仍应从头执行，import 不能再被描述为已通过。已有 `__pycache__` 变化是审查过程生成物，不是本次目标实现；最终提交前需单独确认其归属。
+
+## 11. 落地顺序、风险与回滚
+
+1. 先手工落地并静态编译 `him_go2_config.py`、`go2_asset.py`、`him_go2_env.py`，只解决 import/Asset/Manager 构造，不启动大规模训练。
+2. 在任何训练前先完成 S13–S16：固定 XML runtime 与 policy/deploy canonical joint order 的逐关节映射，统一 `35.55 N*m` calf 上限，加入 finite/hard clip，验证初始姿态、零动作 settle、危险接触终止。
+3. 关闭全部 domain randomization、push、noise、curriculum 和随机延迟，使用 plane 或单一 rough preset 做 4-env reset/step 和 shape gate。
+4. 打开 actor noise、height scan、critic contact，确认 45/239/270/48 分层契约，再打开 reward；S17 必须证明 play 隔离有效。
+5. 按一类一类顺序打开 reset randomization：COM → joint friction/damping → friction → PD → mass/armature → push；每次保存参数快照和 episode metric，所有未验证项仍视为未放行。
+6. 最后验证 partial reset、HIM PPO、checkpoint、play、ONNX/部署与 S18 故障注入，不得把训练曲线正常当作接口验证。
+
+回滚策略是恢复三个目标 Python 文件到修改前版本，保留本文档作为手工迁移说明；不要用 `git reset --hard` 清理工作树，也不要删除未确认属于用户的文件。部署放行前必须同时满足：所有 S0–S18 有证据、`[ALL_TESTS_PASSED]`、动作范围/关节顺序/延迟单位与真实控制器签字确认。

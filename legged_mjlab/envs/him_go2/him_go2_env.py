@@ -10,7 +10,7 @@ from mjlab.tasks.velocity import mdp
 from mjlab.envs.mdp import dr
 import mjlab.terrains as terrain_gen
 from mjlab.utils.lab_api.math import quat_apply_inverse
-
+from mjlab.viewer import ViewerConfig
 from mjlab.managers import (
     CurriculumTermCfg,
     EventTermCfg,
@@ -62,6 +62,8 @@ class HimGo2Env(ManagerBasedRlEnv):
     def _build_mjlab_managercfg(self, play=False, debug_vis = False) -> ManagerBasedRlEnvCfg:
         """ 将 HimGo2RoughCfg 转换为 ManagerBasedRlEnvCfg 以便于使用 mjlab 的管理器进行环境管理。
         """
+        entity_name = self.robot_cfg.asset.name
+
         return ManagerBasedRlEnvCfg(
             decimation = self.robot_cfg.control.decimation,                 # 控制步
             scene = self._build_scene(self.asset, play, debug_vis),         # 构建场景（包含实体、传感器、地形）
@@ -70,11 +72,22 @@ class HimGo2Env(ManagerBasedRlEnv):
             events = self._build_events(),                                  # 挂载事件管理器配置（reset, domain_rand）
             seed = self.robot_cfg.env.seed,                                 # 随机种子
             sim = SimulationCfg(                                            # 仿真引擎底层设置
+                nconmax=35,
+                njmax=1500,
                 mujoco = MujocoCfg(
                     timestep = self.robot_cfg.sim.dt,          # 物理仿真步长
-                    integrator = self.robot_cfg.sim.gravity,   # 重力向量
+                    iterations=10,
+                    ls_iterations=20,
                 )
-            ),                                             
+            ),                         
+            viewer = ViewerConfig(
+                origin_type = ViewerConfig.OriginType.ASSET_BODY,
+                entity_name = entity_name,
+                body_name = "base",
+                distance=3.0,
+                elevation=-5.0,
+                azimuth=90.0,
+            ),                    
             episode_length_s = self.robot_cfg.env.episode_length_s,         # 单回合最长时间
             rewards = self._build_rewards(),                                # 挂载奖励管理器配置
             terminations = self._build_terminations(),                      # 挂载终止条件管理器配置
@@ -82,14 +95,13 @@ class HimGo2Env(ManagerBasedRlEnv):
             curriculum = self._build_curriculum(),
             recorders = ,
             scale_rewards_by_dt = False,
+            metrics =
         )
 
-    def _build_scene(self, asset, play, debug_vis = False):
+    def _build_scene(self, asset, entity_name, play, debug_vis = False):
         """ 构建场景对象，包含地形和机器人实体
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/scene.html
         """
-        entity_name = self.robot_cfg.asset.name
-
         return SceneCfg(
             num_envs = self.robot_cfg.env.num_envs,                                           # 环境数
             env_spacing = self.robot_cfg.env.env_spacing,                                     # 并行环境间的网格间距

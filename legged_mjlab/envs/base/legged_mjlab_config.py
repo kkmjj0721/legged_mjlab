@@ -211,6 +211,11 @@ class LeggedMjlabCfg(BaseConfig):
             gravity = 0.05
             height_measurements = 0.1
 
+    class viewer:
+        ref_env = 0
+        pos = [10, 0, 6] 
+        lookat = [11., 5, 3.]  
+
     class sim:
         dt = 0.005
         substeps = 1
