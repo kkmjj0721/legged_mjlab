@@ -30,14 +30,14 @@ HIMRslRlWrapper
 
 ## 2. 当前文件的明确缺口
 
-当前 `legged_mjlab/legged_mjlab/envs/him_go2/him_go2_env.py` 还不能被 Python 解析，主要缺口是：
+当前 `legged_mjlab/legged_mjlab/envs/him_go2/him_go2_env.py` 还不能被 Python 解析。当前真实阻断是 manager-config builder `:67-99` 中的 `recorders = ,`（`:96`）与 `metrics =`（`:98`）语法错误，以及 registry/构造器、builder 调用/定义和 action 字段不匹配；`ViewerConfig` 的 `:83` 是合法构造，不是错误。主要缺口是：
 
 | 位置 | 当前问题 | 处理方式 |
 | --- | --- | --- |
-| `_build_mjlab_managercfg` | `events =`、`viewer =` 等语法占位符 | 统一构造 manager 配置 |
+| `_build_mjlab_managercfg` | builder `:67-99` 中 `recorders = ,`（`:96`）与 `metrics =`（`:98`）为语法错误；`ViewerConfig` `:83` 不是错误 | 统一构造 manager 配置 |
 | `MujocoCfg` | 把重力向量传给了 `integrator` | `integrator="implicitfast"`，另传 `gravity=tuple(cfg.sim.gravity)` |
 | `_build_scene` | 依赖空的地形与传感器实现 | 使用合法的 generator、接触传感器和 raycast 传感器 |
-| `_build_terrain` | generator 的 `sub_terrains={}` 无法生成地形，也没有非法类型报错 | 基于 `ROUGH_TERRAINS_CFG` 做 `dataclasses.replace` |
+| `_build_terrain` | generator 的 `sub_terrains={}` 无法生成地形，也没有非法类型报错 | 深拷贝 `ROUGH_TERRAINS_CFG` 后显式更新字段 |
 | `_joint_names` | 缺少 `self` | 改成静态方法或普通实例方法 |
 | `_build_actions` | `actuator_name`、`hip_scale_reduction`、`action_clip` 均不符合当前项目接口 | 使用 `actuator_names`、`hip_reduction`，不把旧 clip 字段硬塞给 mjlab |
 | `_reward_scale` | `BaseConfig` 子类不是 Mapping，不能调用 `.get()` | 使用 `getattr(cfg.rewards.scales, name, 0.0)` |
@@ -54,7 +54,9 @@ HIMRslRlWrapper
 
 ### 3.1 actor 45 维
 
-actor group 必须只产生一帧 45 维观测，顺序固定为：
+actor group 必须只产生一帧 45 维观测。文档候选固定唯一的 native/policy actor 顺序为
+`base_ang_vel → projected_gravity → command → joint_pos → joint_vel → actions`；这个顺序
+由第 4 节 `actor_terms` 的插入顺序定义，不能再把部署 YAML 的字段列表当成 native 顺序。
 
 | term | 维度 | 来源 |
 | --- | ---: | --- |
@@ -63,12 +65,12 @@ actor group 必须只产生一帧 45 维观测，顺序固定为：
 | `command` | 3 | `twist` command 的 `vx, vy, wz` |
 | `joint_pos` | 12 | 12 个 Go2 关节相对默认角 |
 | `joint_vel` | 12 | 12 个 Go2 关节速度 |
-| `actions` | 12 | 上一帧 policy action |
+| `actions` | 12 | 上一帧 **policy action**（归一化、未延迟、未执行的动作） |
 | **合计** | **45** | |
 
 HIM-Go2 的 policy canonical joint order 契约为：
 `FL(hip,thigh,calf), RL(hip,thigh,calf), FR(hip,thigh,calf), RR(hip,thigh,calf)`。
-这是部署 YAML 的 leg-major 顺序；它不同于当前配置字典按 hip/thigh/calf 分组的插入顺序，也不同于 XML 的 `FL,FR,RL,RR` 全局腿顺序。候选代码不定义独立的顺序常量，而是通过 `_joint_names()` 与四个分腿 action term 固定策略顺序，不能依赖 `dict`、MJCF 或 actuator 自然顺序。
+这是文档候选的 policy/deployment canonical leg-major 顺序；它不同于当前配置字典按 hip/thigh/calf 分组的插入顺序，也不同于 XML 的 `FL,FR,RL,RR` 全局腿顺序。部署 YAML 的字段/关节数组顺序属于外部布局，不能直接视为 native actor/action 顺序，必须用零动作与单位脉冲做 deployment↔native round-trip 后才可接线。候选必须使用显式有序 leg-major joint/action 列表，并在 resolve 后按名称逐项断言；dict 插入顺序、MJCF/XML 自然顺序和部署 YAML 注释都不是已验证映射，必须通过零动作与单位脉冲 round-trip。
 
 旧配置里的 `num_commands = 4` 包含 heading 这个命令配置字段，但 `heading_command=False` 时 heading 不进入 actor 观测；因此 actor 中必须使用 `generated_commands("twist")` 的 3 维输出。
 
@@ -88,17 +90,35 @@ critic 以同样的 45 维 actor 一帧开头，再拼接：
 
 原生 mjlab observation group 的 `history_length` 必须保持为 `1`。6 帧历史由已有的 `HIMRslRlWrapper` 维护，否则会把 45 维再次历史展开，导致 actor 维度重复。
 
+`actions` 这个 actor 字段固定表示 policy 在上一个 policy step 发出的归一化 action；它不是 actuator delay、PD、effort clip 之后的 executed action。若部署侧要观测或记录 executed/delayed action，必须另设字段，不能复用这 12 维而不改 shape/训练语义。
+
+动作状态必须按四层记录：raw policy action → accepted/clipped action → delayed target → executed torque。第4节候选中 native actor 的 actions 固定是上一帧 raw policy action；环境候选对输入做 [-1,1] clamp，wrapper 负责 finite 检查，部署 adapter 对越界/NaN/Inf 的 reject、输出抑制和 safe path 均没有 runtime 证据。observation delay 按 policy-step 计，custom ScaledIdealPdActuator 的 delay 按 physics-step 计；不能把普通 IdealPd 与 custom actuator 描述成共用 fused buffer。shape 仍固定为 actor 45、native critic 239、wrapper history 270、runner estimator 48；本地 HIMActorCritic 的输入是 45+3+16=64，upstream HIMLoco 的 76 不能直接复用。
+
 History 的时序顺序必须与 critic 的 feature 切片分开记录。HIMLoco 在 `/home/kk/github/HIMLoco/legged_gym/legged_gym/envs/go2w/go2w_legged_robot.py:51-52` 先放入 `current_obs`，再接 `obs_buf` 中的旧帧；当前 wrapper 在 `/home/kk/legged_mjlab/legged_mjlab/wrappers/him_wrapper.py:161-180` 先将旧的 `obs_history_buf` 向后移动，再把当前 actor 写入 `obs_history_buf[:, 0]`，flatten 后的 270 维顺序是 `[current frame, older frames...]`。这个 current-first 约定不能由 upstream estimator 的 critic 切片反推。
 
 ## 4. `him_go2_env.py` 完整替换代码
 
 下面的代码块是单文件替换版本。复制时覆盖目标文件的全部内容；本文本身不会自动覆盖它。
 
-```python
-from __future__ import annotations
+第 4 节候选遵守 `RewardManager` 的统一契约：每个 `RewardTermCfg(func=...)` 在一次
+policy step 中按 `func(env, **params)` 调用；自定义函数虽然写在 `HimGo2Env` 类内，
+仍必须把 `env` 作为第一个显式参数，并由 `_build_rewards` 传入其余参数。每个 term 最终
+返回位于 `env.device`、通常为 `torch.float32` 的一维 tensor `[N]`，其中 `N` 是并行环境
+数；关节、足端、接触项都必须在函数内部先归约到环境维，不能返回 `[N, J]` 或
+`[N, foot]`。调用时刻是完成本次 action 的 decimation 后、manager 汇总 reward 的当前
+状态；本候选 `sim.dt=0.005`、`decimation=4`，policy `step_dt=0.02 s`。速度单位为
+`m/s` 或 `rad/s`，角度为 `rad`，高度为 `m`，力为 `N`，力矩为 `N·m`，功率为
+`N·m·rad/s`；tracking 输出无量纲，penalty 输出是对应量经过平方/绝对值及关节或足端
+归约后的标量。`RewardTermCfg.weight` 直接使用 legacy raw scale，并由
+`scale_rewards_by_dt=True` 统一乘 policy `step_dt`，不得在函数内再次乘 dt。
 
+最终候选的自定义 reward 计算全部属于 `HimGo2Env` 的 `@staticmethod`；代码块不保留
+同名模块级 reward helper。`envs_mdp.*` 只代表 mjlab 通用 term（不是本项目自定义
+reward），可继续按同一 `func(env, **params) -> [N]` 契约注册。
+
+```python
 import math
-from dataclasses import replace
+import copy
 
 import torch
 
@@ -179,147 +199,6 @@ def _foot_contact_observation(env, sensor_name: str) -> torch.Tensor:
     return (found > 0).float()
 
 
-def track_linear_velocity(
-    env: ManagerBasedRlEnv,
-    std: float,
-    command_name: str,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """Reward for tracking commanded base linear velocity in the xy plane.
-
-    The z component is handled by the independent ``lin_vel_z`` penalty.
-  """
-    asset: Entity = env.scene[asset_cfg.name]
-    command = env.command_manager.get_command(command_name)
-    assert command is not None, f"Command '{command_name}' not found."
-    actual = asset.data.root_link_lin_vel_b
-    lin_vel_error = torch.sum(torch.square(command[:, :2] - actual[:, :2]), dim=1)
-    return torch.exp(-lin_vel_error / std**2)
-
-
-def track_angular_velocity(
-    env: ManagerBasedRlEnv,
-    std: float,
-    command_name: str,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """Reward for tracking commanded yaw angular velocity.
-
-    The xy components are handled by the independent ``ang_vel_xy`` penalty.
-  """
-    asset: Entity = env.scene[asset_cfg.name]
-    command = env.command_manager.get_command(command_name)
-    assert command is not None, f"Command '{command_name}' not found."
-    actual = asset.data.root_link_ang_vel_b
-    ang_vel_error = torch.square(command[:, 2] - actual[:, 2])
-    return torch.exp(-ang_vel_error / std**2)
-
-
-def body_orientation_l2(
-    env: ManagerBasedRlEnv,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """Reward flat base orientation (robot being upright).
-
-  If asset_cfg has body_ids specified, computes the projected gravity
-  for that specific body. Otherwise, uses the root link projected gravity.
-  """
-    asset: Entity = env.scene[asset_cfg.name]
-
-    body_ids = asset_cfg.body_ids
-    if not isinstance(body_ids, slice):
-        body_quat_w = asset.data.body_link_quat_w[:, body_ids, :]
-        if body_quat_w.shape[1] != 1:
-            raise ValueError("body_orientation_l2 expects one selected body")
-        body_quat_w = body_quat_w.squeeze(1)
-        # ``gravity_vec_w`` is an EntityData instance field (and can be a
-        # shared [3] vector), so retain the configured world-gravity direction.
-        gravity_w = asset.data.gravity_vec_w
-        projected_gravity_b = quat_apply_inverse(body_quat_w, gravity_w)
-        xy_squared = torch.sum(torch.square(projected_gravity_b[:, :2]), dim=1)
-    else:
-        xy_squared = torch.sum(torch.square(asset.data.projected_gravity_b[:, :2]), dim=1)
-    return xy_squared
-
-
-def lin_vel_z(
-    env: ManagerBasedRlEnv,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    asset: Entity = env.scene[asset_cfg.name]
-    return torch.square(asset.data.root_link_lin_vel_b[:, 2])
-
-
-def ang_vel_xy(
-    env: ManagerBasedRlEnv,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    asset: Entity = env.scene[asset_cfg.name]
-    return torch.sum(torch.square(asset.data.root_link_ang_vel_b[:, :2]), dim=1)
-
-
-def feet_air_time(
-    env: ManagerBasedRlEnv,
-    sensor_name: str,
-    threshold: float = 0.4,
-    command_name: str | None = None,
-    command_threshold: float = 0.1,
-) -> torch.Tensor:
-    """Reward feet air time."""
-    sensor: ContactSensor = env.scene[sensor_name]
-    sensor_data = sensor.data
-    air_time = sensor_data.current_air_time
-    contact_time = sensor_data.current_contact_time
-    in_contact = contact_time > 0.0
-    in_mode_time = torch.where(in_contact, contact_time, air_time)
-    single_stance = torch.mean(in_contact.float(), dim=1) == 0.5
-    mode_time = torch.min(
-        torch.where(single_stance.unsqueeze(-1), in_mode_time, 0.0), dim=1
-    )[0]
-    error = torch.abs(mode_time - threshold)
-    reward = torch.clamp(threshold - error, min=0.0)
-    if command_name is not None:
-        command = env.command_manager.get_command(command_name)
-        if command is not None:
-            linear_norm = torch.norm(command[:, :2], dim=1)
-            angular_norm = torch.abs(command[:, 2])
-            total_command = linear_norm + angular_norm
-            scale = (total_command > command_threshold).float()
-            reward *= scale
-    return reward
-
-
-def self_collision_cost(
-    env: ManagerBasedRlEnv,
-    sensor_name: str,
-    force_threshold: float = 10.0,
-) -> torch.Tensor:
-    """Penalize self-collisions."""
-    sensor: ContactSensor = env.scene[sensor_name]
-    data = sensor.data
-    if data.force_history is not None:
-        force_mag = torch.norm(data.force_history, dim=-1)
-        hit = (force_mag > force_threshold).any(dim=1)
-        return hit.sum(dim=-1).float()
-    assert data.found is not None
-    return (data.found > 0).any(dim=-1).float()
-
-
-def illegal_contact(
-    env: ManagerBasedRlEnv,
-    sensor_name: str,
-    force_threshold: float = 10.0,
-) -> torch.Tensor:
-    """Terminate when a forbidden contact exceeds the force threshold."""
-    sensor: ContactSensor = env.scene[sensor_name]
-    data = sensor.data
-    if data.force_history is not None:
-        force_mag = torch.norm(data.force_history, dim=-1)
-        return (force_mag > force_threshold).any(dim=-1).any(dim=-1)
-    assert data.found is not None
-    return torch.any(data.found, dim=-1)
-
-
 def randomize_motor_strength(
     env: ManagerBasedRlEnv,
     env_ids: torch.Tensor | None,
@@ -351,124 +230,6 @@ def randomize_motor_strength(
         shape = (env_ids.numel(), actuator.target_ids.numel())
         samples = torch.empty(shape, device=env.device).uniform_(low, high)
         setter(env_ids, samples)
-
-
-def hip_pos(
-    env: ManagerBasedRlEnv,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """Penalize hip deviation from the robot's default joint pose."""
-
-    asset: Entity = env.scene[asset_cfg.name]
-    default_joint_pos = asset.data.default_joint_pos
-    assert default_joint_pos is not None
-    diff_angle = (
-        asset.data.joint_pos[:, asset_cfg.joint_ids]
-        - default_joint_pos[:, asset_cfg.joint_ids]
-    )
-    return torch.sum(torch.square(diff_angle), dim=1)
-
-
-def _base_height_l2(
-    env: ManagerBasedRlEnv,
-    target_height: float,
-    sensor_name: str,
-    asset_cfg: SceneEntityCfg,
-) -> torch.Tensor:
-    """Penalize mean valid terrain-relative root height from a raycast sensor."""
-
-    asset = env.scene[asset_cfg.name]
-    data = env.scene[sensor_name].data
-    valid = data.distances >= 0
-    terrain_relative_height = (
-        asset.data.root_link_pose_w[:, 2].unsqueeze(-1) - data.hit_pos_w[..., 2]
-    )
-    terrain_relative_height = torch.where(
-        valid, terrain_relative_height, torch.zeros_like(terrain_relative_height)
-    )
-    valid_count = valid.sum(dim=-1).clamp_min(1)
-    measured_height = terrain_relative_height.sum(dim=-1) / valid_count
-    return torch.square(measured_height - target_height)
-
-
-def feet_clearance(
-    env: ManagerBasedRlEnv,
-    target_height: float,
-    command_name: str | None = None,
-    command_threshold: float = 0.1,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    """Penalize deviation from target clearance height, weighted by foot velocity."""
-    asset: Entity = env.scene[asset_cfg.name]
-    foot_z = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]
-    foot_vel_xy = asset.data.site_lin_vel_w[:, asset_cfg.site_ids, :2]
-    vel_norm = torch.norm(foot_vel_xy, dim=-1)
-    delta = torch.abs(foot_z - target_height)
-    cost = torch.sum(delta * vel_norm, dim=1)
-    if command_name is not None:
-        command = env.command_manager.get_command(command_name)
-        if command is not None:
-            linear_norm = torch.norm(command[:, :2], dim=1)
-            angular_norm = torch.abs(command[:, 2])
-            total_command = linear_norm + angular_norm
-            active = (total_command > command_threshold).float()
-            cost = cost * active
-    return cost
-
-
-def _joint_power_l1(env, asset_cfg: SceneEntityCfg):
-    """Penalize absolute actuator mechanical power for the selected joints."""
-
-    asset = env.scene[asset_cfg.name]
-    torque = asset.data.qfrc_actuator[:, asset_cfg.joint_ids]
-    velocity = asset.data.joint_vel[:, asset_cfg.joint_ids]
-    return torch.sum(torch.abs(torque * velocity), dim=1)
-
-
-def stand_still(
-    env: ManagerBasedRlEnv,
-    command_name: str,
-    command_threshold: float = 0.1,
-    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-) -> torch.Tensor:
-    asset: Entity = env.scene[asset_cfg.name]
-    diff_angle = asset.data.joint_pos[:, asset_cfg.joint_ids] - asset.data.default_joint_pos[:, asset_cfg.joint_ids]
-    reward = torch.sum(torch.square(diff_angle), dim=1)
-    if command_name is not None:
-        command = env.command_manager.get_command(command_name)
-        if command is not None:
-            linear_norm = torch.norm(command[:, :2], dim=1)
-            angular_norm = torch.abs(command[:, 2])
-            total_command = linear_norm + angular_norm
-            scale = (total_command <= command_threshold).float()
-            reward *= scale
-    return reward
-
-
-def _torque_limit_cost(
-    env,
-    soft_limit: float,
-    asset_cfg: SceneEntityCfg,
-):
-    """Penalize actuator output above each configured Ideal-PD effort limit."""
-
-    asset = env.scene[asset_cfg.name]
-    force = asset.data.actuator_force
-    limits = torch.full_like(force, float("inf"))
-
-    # Go2Asset creates three IdealPdActuator groups.  Their force_limit tensors
-    # are per-environment, so the term also remains valid after effort-limit DR.
-    for actuator in asset.actuators:
-        force_limit = getattr(actuator, "force_limit", None)
-        if force_limit is None:
-            continue
-        limits[:, actuator.ctrl_ids] = force_limit
-
-    force = force[:, asset_cfg.actuator_ids]
-    limits = limits[:, asset_cfg.actuator_ids]
-    denominator = torch.clamp(limits * max(float(soft_limit), 1.0e-6), min=1.0e-6)
-    excess = torch.relu(torch.abs(force) / denominator - 1.0)
-    return torch.sum(torch.square(excess), dim=1)
 
 
 class HimGo2Env(ManagerBasedRlEnv):
@@ -512,6 +273,379 @@ class HimGo2Env(ManagerBasedRlEnv):
         # Apply the legacy post-sum clamp only after all reward terms have been
         # accumulated; termination remains a separate manager signal.
         return obs, torch.clamp_min(reward, 0.0), terminated, truncated, extras
+
+    @staticmethod
+    def _reward_tracking_lin_vel(
+        env: ManagerBasedRlEnv,
+        std: float,
+        command_name: str,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        """Return xy velocity tracking reward as a finite ``[N]`` tensor."""
+
+        asset: Entity = env.scene[asset_cfg.name]
+        command = env.command_manager.get_command(command_name)
+        assert command is not None, f"Command '{command_name}' not found."
+        actual = asset.data.root_link_lin_vel_b
+        error = torch.sum(torch.square(command[:, :2] - actual[:, :2]), dim=1)
+        return torch.exp(-error / std**2)
+
+    @staticmethod
+    def _reward_tracking_ang_vel(
+        env: ManagerBasedRlEnv,
+        std: float,
+        command_name: str,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        """Return yaw velocity tracking reward as a finite ``[N]`` tensor."""
+
+        asset: Entity = env.scene[asset_cfg.name]
+        command = env.command_manager.get_command(command_name)
+        assert command is not None, f"Command '{command_name}' not found."
+        error = torch.square(
+            command[:, 2] - asset.data.root_link_ang_vel_b[:, 2]
+        )
+        return torch.exp(-error / std**2)
+
+    @staticmethod
+    def _reward_orientation(
+        env: ManagerBasedRlEnv,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        """Return projected-gravity xy square error as ``[N]``."""
+
+        asset: Entity = env.scene[asset_cfg.name]
+        body_ids = asset_cfg.body_ids
+        if not isinstance(body_ids, slice):
+            body_quat_w = asset.data.body_link_quat_w[:, body_ids, :]
+            if body_quat_w.shape[1] != 1:
+                raise ValueError("body_orientation_l2 expects one selected body")
+            projected_gravity_b = quat_apply_inverse(
+                body_quat_w.squeeze(1), asset.data.gravity_vec_w
+            )
+            return torch.sum(torch.square(projected_gravity_b[:, :2]), dim=1)
+        return torch.sum(
+            torch.square(asset.data.projected_gravity_b[:, :2]), dim=1
+        )
+
+    @staticmethod
+    def _reward_lin_vel_z(
+        env: ManagerBasedRlEnv,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        return torch.square(asset.data.root_link_lin_vel_b[:, 2])
+
+    @staticmethod
+    def _reward_ang_vel_xy(
+        env: ManagerBasedRlEnv,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        return torch.sum(torch.square(asset.data.root_link_ang_vel_b[:, :2]), dim=1)
+
+    @staticmethod
+    def _reward_dof_acc(
+        env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg
+    ) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        joint_acc = asset.data.joint_acc[:, asset_cfg.joint_ids]
+        return torch.sum(torch.square(joint_acc), dim=1)
+
+    @staticmethod
+    def _reward_action_rate(env: ManagerBasedRlEnv) -> torch.Tensor:
+        action_manager = env.action_manager
+        action_rate = action_manager.action - action_manager.prev_action
+        return torch.sum(torch.square(action_rate), dim=1)
+
+    @staticmethod
+    def _reward_smoothness(env: ManagerBasedRlEnv) -> torch.Tensor:
+        action_manager = env.action_manager
+        smoothness = (
+            action_manager.action
+            - 2.0 * action_manager.prev_action
+            + action_manager.prev_prev_action
+        )
+        return torch.sum(torch.square(smoothness), dim=1)
+
+    @staticmethod
+    def _reward_torques(
+        env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg
+    ) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        actuator_force = asset.data.actuator_force[:, asset_cfg.actuator_ids]
+        return torch.sum(torch.square(actuator_force), dim=1)
+
+    @staticmethod
+    def _reward_dof_vel(
+        env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg
+    ) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        joint_vel = asset.data.joint_vel[:, asset_cfg.joint_ids]
+        return torch.sum(torch.square(joint_vel), dim=1)
+
+    @staticmethod
+    def _reward_dof_pos_limits(
+        env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg
+    ) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        joint_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]
+        soft_limits = asset.data.soft_joint_pos_limits[:, asset_cfg.joint_ids]
+        lower = soft_limits[..., 0]
+        upper = soft_limits[..., 1]
+        violation = torch.relu(lower - joint_pos) + torch.relu(joint_pos - upper)
+        return torch.sum(violation, dim=1)
+
+    @staticmethod
+    def _reward_dof_vel_limits(
+        env: ManagerBasedRlEnv,
+        velocity_limits: float | torch.Tensor | tuple[float, ...],
+        soft_limit: float,
+        asset_cfg: SceneEntityCfg,
+    ) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        joint_vel = asset.data.joint_vel[:, asset_cfg.joint_ids]
+        limits = torch.as_tensor(
+            velocity_limits, device=joint_vel.device, dtype=joint_vel.dtype
+        )
+        if limits.ndim == 0:
+            limits = limits.expand_as(joint_vel)
+        elif limits.ndim == 1 and limits.shape[0] == joint_vel.shape[1]:
+            limits = limits.unsqueeze(0)
+        elif limits.shape != joint_vel.shape:
+            raise ValueError(
+                "velocity_limits must be a scalar, one value per selected joint, "
+                f"or have shape {tuple(joint_vel.shape)}"
+            )
+        soft_limit_tensor = torch.as_tensor(
+            soft_limit, device=joint_vel.device, dtype=joint_vel.dtype
+        )
+        violation = torch.relu(
+            torch.abs(joint_vel) - limits * soft_limit_tensor
+        )
+        return torch.sum(torch.clamp(violation, max=1.0), dim=1)
+
+    @staticmethod
+    def _reward_feet_stumble(
+        env: ManagerBasedRlEnv, sensor_name: str
+    ) -> torch.Tensor:
+        force = env.scene[sensor_name].data.force
+        if force is None or force.ndim != 3 or force.shape[1:] != (4, 3):
+            raise ValueError("feet force must have shape [N, 4, 3]")
+        horizontal_force = torch.linalg.vector_norm(force[..., :2], dim=-1)
+        stumble = horizontal_force > 5.0 * torch.abs(force[..., 2])
+        return stumble.any(dim=1).to(dtype=force.dtype)
+
+    @staticmethod
+    def _reward_termination(env: ManagerBasedRlEnv) -> torch.Tensor:
+        return env.termination_manager.terminated.to(dtype=torch.float32)
+
+    @staticmethod
+    def _reward_feet_air_time(
+        env: ManagerBasedRlEnv,
+        sensor_name: str,
+        threshold: float = 0.4,
+        command_name: str | None = None,
+        command_threshold: float = 0.1,
+    ) -> torch.Tensor:
+        """Return mode-time air/contact reward as ``[N]``.
+
+        With four feet, ``mean(in_contact) == 0.5`` means exactly two feet are
+        in contact.  It is a two-contact mode, not a single-stance condition.
+        """
+
+        sensor: ContactSensor = env.scene[sensor_name]
+        sensor_data = sensor.data
+        air_time = sensor_data.current_air_time
+        contact_time = sensor_data.current_contact_time
+        in_contact = contact_time > 0.0
+        in_mode_time = torch.where(in_contact, contact_time, air_time)
+        two_contact_mode = torch.mean(in_contact.float(), dim=1) == 0.5
+        mode_time = torch.min(
+            torch.where(two_contact_mode.unsqueeze(-1), in_mode_time, 0.0), dim=1
+        )[0]
+        reward = torch.clamp(
+            threshold - torch.abs(mode_time - threshold), min=0.0
+        )
+        if command_name is not None:
+            command = env.command_manager.get_command(command_name)
+            if command is not None:
+                command_norm = torch.linalg.vector_norm(command[:, :2], dim=1)
+                command_norm = command_norm + torch.abs(command[:, 2])
+                reward *= (command_norm > command_threshold).to(reward.dtype)
+        return reward
+
+    @staticmethod
+    def _reward_collision(
+        env: ManagerBasedRlEnv,
+        sensor_name: str,
+        force_threshold: float = 10.0,
+    ) -> torch.Tensor:
+        """Count hit history samples, not the total number of contacts."""
+
+        data = env.scene[sensor_name].data
+        if data.force_history is not None:
+            # Explicit sensor contract: [N, primary, history, 3] = batch,
+            # matched geom/body, history sample, force vector in N.
+            history = data.force_history
+            if history.ndim != 4 or history.shape[-1] != 3:
+                raise ValueError(
+                    "force_history must have shape [N, primary, history, 3]"
+                )
+            hit_per_slot = (
+                torch.linalg.vector_norm(history, dim=-1) > force_threshold
+            ).any(dim=1)
+            # Reduce primary items first, then count hit history slots.  The
+            # result is [N]; a history slot is not a contact-count unit.
+            return hit_per_slot.sum(dim=-1).to(dtype=torch.float32)
+        assert data.found is not None
+        found = data.found > 0
+        if found.ndim == 3:
+            found = found.any(dim=-1)
+        if found.ndim != 2:
+            raise ValueError("found must have shape [N, primary] or [N, primary, slot]")
+        return found.any(dim=-1).to(dtype=torch.float32)
+
+    @staticmethod
+    def _reward_illegal_contact(
+        env: ManagerBasedRlEnv,
+        sensor_name: str,
+        force_threshold: float = 10.0,
+    ) -> torch.Tensor:
+        """Return a boolean ``[N]`` termination mask for forbidden contact."""
+
+        data = env.scene[sensor_name].data
+        if data.force_history is not None:
+            history = data.force_history
+            if history.ndim != 4 or history.shape[-1] != 3:
+                raise ValueError(
+                    "force_history must have shape [N, primary, history, 3]"
+                )
+            hit = torch.linalg.vector_norm(history, dim=-1) > force_threshold
+            return hit.any(dim=1).any(dim=1)
+        assert data.found is not None
+        found = data.found > 0
+        if found.ndim == 3:
+            found = found.any(dim=-1)
+        if found.ndim != 2:
+            raise ValueError("found must have shape [N, primary] or [N, primary, slot]")
+        return found.any(dim=-1)
+
+    @staticmethod
+    def _reward_hip_pos(
+        env: ManagerBasedRlEnv,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        default_joint_pos = asset.data.default_joint_pos
+        assert default_joint_pos is not None
+        diff = asset.data.joint_pos[:, asset_cfg.joint_ids] - default_joint_pos[
+            :, asset_cfg.joint_ids
+        ]
+        return torch.sum(torch.square(diff), dim=1)
+
+    @staticmethod
+    def _reward_base_height(
+        env: ManagerBasedRlEnv,
+        target_height: float,
+        sensor_name: str,
+        asset_cfg: SceneEntityCfg,
+    ) -> torch.Tensor:
+        asset = env.scene[asset_cfg.name]
+        data = env.scene[sensor_name].data
+        valid = data.distances >= 0
+        relative_height = (
+            asset.data.root_link_pose_w[:, 2].unsqueeze(-1)
+            - data.hit_pos_w[..., 2]
+        )
+        relative_height = torch.where(
+            valid, relative_height, torch.zeros_like(relative_height)
+        )
+        measured_height = relative_height.sum(dim=-1) / valid.sum(
+            dim=-1
+        ).clamp_min(1)
+        return torch.square(measured_height - target_height)
+
+    @staticmethod
+    def _reward_foot_clearance(
+        env: ManagerBasedRlEnv,
+        target_height: float,
+        command_name: str | None = None,
+        command_threshold: float = 0.1,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        """Return world/site absolute-height clearance cost as ``[N]``."""
+
+        asset: Entity = env.scene[asset_cfg.name]
+        foot_z = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]
+        foot_vel_xy = asset.data.site_lin_vel_w[:, asset_cfg.site_ids, :2]
+        cost = torch.sum(
+            torch.abs(foot_z - target_height)
+            * torch.linalg.vector_norm(foot_vel_xy, dim=-1),
+            dim=1,
+        )
+        if command_name is not None:
+            command = env.command_manager.get_command(command_name)
+            if command is not None:
+                command_norm = torch.linalg.vector_norm(command[:, :2], dim=1)
+                command_norm = command_norm + torch.abs(command[:, 2])
+                cost *= (command_norm > command_threshold).to(cost.dtype)
+        return cost
+
+    @staticmethod
+    def _reward_joint_power(
+        env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg
+    ) -> torch.Tensor:
+        asset = env.scene[asset_cfg.name]
+        torque = asset.data.qfrc_actuator[:, asset_cfg.joint_ids]
+        velocity = asset.data.joint_vel[:, asset_cfg.joint_ids]
+        return torch.sum(torch.abs(torque * velocity), dim=1)
+
+    @staticmethod
+    def _reward_stand_still(
+        env: ManagerBasedRlEnv,
+        command_name: str,
+        command_threshold: float = 0.1,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        diff = asset.data.joint_pos[:, asset_cfg.joint_ids] - asset.data.default_joint_pos[
+            :, asset_cfg.joint_ids
+        ]
+        reward = torch.sum(torch.square(diff), dim=1)
+        command = env.command_manager.get_command(command_name)
+        if command is not None:
+            command_norm = torch.linalg.vector_norm(command[:, :2], dim=1)
+            command_norm = command_norm + torch.abs(command[:, 2])
+            reward *= (command_norm <= command_threshold).to(reward.dtype)
+        return reward
+
+    @staticmethod
+    def _reward_torque_limits(
+        env: ManagerBasedRlEnv,
+        soft_limit: float,
+        asset_cfg: SceneEntityCfg,
+    ) -> torch.Tensor:
+        """Return normalized squared force-limit cost as ``[N]``."""
+
+        asset = env.scene[asset_cfg.name]
+        # Caveat: actuator_force may already be post-effort-clamp.  In that
+        # case no value above the hard limit survives for this term to see;
+        # soft_limit=1.0 also leaves no margin and can make the cost identically
+        # zero.  S14 must verify whether a pre-clamp signal is available.
+        force = asset.data.actuator_force
+        limits = torch.full_like(force, float("inf"))
+        for actuator in asset.actuators:
+            force_limit = getattr(actuator, "force_limit", None)
+            if force_limit is not None:
+                limits[:, actuator.ctrl_ids] = force_limit
+        force = force[:, asset_cfg.actuator_ids]
+        limits = limits[:, asset_cfg.actuator_ids]
+        denominator = torch.clamp(
+            limits * max(float(soft_limit), 1.0e-6), min=1.0e-6
+        )
+        excess = torch.relu(torch.abs(force) / denominator - 1.0)
+        return torch.sum(torch.square(excess), dim=1)
 
     @staticmethod
     def _joint_names(cfg) -> tuple[str, ...]:
@@ -788,18 +922,16 @@ class HimGo2Env(ManagerBasedRlEnv):
             ),
         }
 
-        # ROUGH_TERRAINS_CFG supplies the remaining valid generator defaults;
-        # replace its sub-terrain table so legacy proportions and resolutions
-        # are actually consumed instead of silently using preset defaults.
-        generator = replace(
-            ROUGH_TERRAINS_CFG,
-            sub_terrains=sub_terrains,
-            curriculum=bool(cfg.terrain.curriculum and not play),
-            size=terrain_size,
-            border_width=float(cfg.terrain.border_size),
-            num_rows=5 if play else int(cfg.terrain.num_rows),
-            num_cols=5 if play else int(cfg.terrain.num_cols),
-        )
+        # ROUGH_TERRAINS_CFG supplies the remaining valid generator defaults.
+        # Deep-copy it before updating legacy fields so this environment never
+        # mutates the shared preset for a later environment construction.
+        generator = copy.deepcopy(ROUGH_TERRAINS_CFG)
+        generator.sub_terrains = sub_terrains
+        generator.curriculum = bool(cfg.terrain.curriculum and not play)
+        generator.size = terrain_size
+        generator.border_width = float(cfg.terrain.border_size)
+        generator.num_rows = 5 if play else int(cfg.terrain.num_rows)
+        generator.num_cols = 5 if play else int(cfg.terrain.num_cols)
         return TerrainEntityCfg(
             terrain_type="generator",
             terrain_generator=generator,
@@ -1080,11 +1212,11 @@ class HimGo2Env(ManagerBasedRlEnv):
             )
         }
 
-    def _reward_scale(self, cfg, name: str) -> float:
+    def _scale_for_reward(self, cfg, name: str) -> float:
         return float(getattr(cfg.rewards.scales, name, 0.0))
 
     def _add_reward(self, terms, cfg, name: str, func, params=None):
-        weight = self._reward_scale(cfg, name)
+        weight = self._scale_for_reward(cfg, name)
         if weight == 0.0:
             return
         terms[name] = RewardTermCfg(
@@ -1127,56 +1259,56 @@ class HimGo2Env(ManagerBasedRlEnv):
             terms,
             cfg,
             "tracking_lin_vel",
-            track_linear_velocity,
+            HimGo2Env._reward_tracking_lin_vel,
             {"command_name": "twist", "std": std, "asset_cfg": SceneEntityCfg(entity_name)},
         )
         self._add_reward(
             terms,
             cfg,
             "tracking_ang_vel",
-            track_angular_velocity,
+            HimGo2Env._reward_tracking_ang_vel,
             {"command_name": "twist", "std": std, "asset_cfg": SceneEntityCfg(entity_name)},
         )
         self._add_reward(
             terms,
             cfg,
             "lin_vel_z",
-            lin_vel_z,
+            HimGo2Env._reward_lin_vel_z,
             {"asset_cfg": SceneEntityCfg(entity_name)},
         )
         self._add_reward(
             terms,
             cfg,
             "ang_vel_xy",
-            ang_vel_xy,
+            HimGo2Env._reward_ang_vel_xy,
             {"asset_cfg": SceneEntityCfg(entity_name)},
         )
         self._add_reward(
             terms,
             cfg,
             "orientation",
-            body_orientation_l2,
+            HimGo2Env._reward_orientation,
             {"asset_cfg": SceneEntityCfg(entity_name)},
         )
         self._add_reward(
             terms,
             cfg,
             "dof_acc",
-            envs_mdp.joint_acc_l2,
+            HimGo2Env._reward_dof_acc,
             {"asset_cfg": joint_cfg},
         )
         self._add_reward(
             terms,
             cfg,
             "joint_power",
-            _joint_power_l1,
+            HimGo2Env._reward_joint_power,
             {"asset_cfg": joint_cfg},
         )
         self._add_reward(
             terms,
             cfg,
             "base_height",
-            _base_height_l2,
+            HimGo2Env._reward_base_height,
             {
                 "target_height": float(cfg.rewards.base_height_target),
                 "sensor_name": "height_scan",
@@ -1187,7 +1319,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             terms,
             cfg,
             "foot_clearance",
-            feet_clearance,
+            HimGo2Env._reward_foot_clearance,
             {
                 # The old config stores -0.2; the Unitree implementation uses
                 # site_pos_w directly, so keep the converted positive target explicit.
@@ -1203,19 +1335,19 @@ class HimGo2Env(ManagerBasedRlEnv):
             terms,
             cfg,
             "action_rate",
-            envs_mdp.action_rate_l2,
+            HimGo2Env._reward_action_rate,
         )
         self._add_reward(
             terms,
             cfg,
             "smoothness",
-            envs_mdp.action_acc_l2,
+            HimGo2Env._reward_smoothness,
         )
         self._add_reward(
             terms,
             cfg,
             "feet_air_time",
-            feet_air_time,
+            HimGo2Env._reward_feet_air_time,
             {
                 "sensor_name": "feet_ground_contact",
                 "threshold": 0.4,
@@ -1227,7 +1359,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             terms,
             cfg,
             "collision",
-            self_collision_cost,
+            HimGo2Env._reward_collision,
             {
                 "sensor_name": "nonfoot_ground_touch",
                 "force_threshold": float(cfg.rewards.max_contact_force),
@@ -1237,7 +1369,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             terms,
             cfg,
             "stand_still",
-            stand_still,
+            HimGo2Env._reward_stand_still,
             {
                 "command_name": "twist",
                 "command_threshold": 0.1,
@@ -1248,28 +1380,28 @@ class HimGo2Env(ManagerBasedRlEnv):
             terms,
             cfg,
             "torques",
-            envs_mdp.joint_torques_l2,
+            HimGo2Env._reward_torques,
             {"asset_cfg": actuator_cfg},
         )
         self._add_reward(
             terms,
             cfg,
             "dof_vel",
-            envs_mdp.joint_vel_l2,
+            HimGo2Env._reward_dof_vel,
             {"asset_cfg": joint_cfg},
         )
         self._add_reward(
             terms,
             cfg,
             "dof_pos_limits",
-            envs_mdp.joint_pos_limits,
+            HimGo2Env._reward_dof_pos_limits,
             {"asset_cfg": joint_cfg},
         )
         self._add_reward(
             terms,
             cfg,
             "torque_limits",
-            _torque_limit_cost,
+            HimGo2Env._reward_torque_limits,
             {
                 "soft_limit": float(cfg.rewards.soft_torque_limit),
                 "asset_cfg": actuator_cfg,
@@ -1279,7 +1411,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             terms,
             cfg,
             "hip_pos",
-            hip_pos,
+            HimGo2Env._reward_hip_pos,
             {"asset_cfg": hip_cfg},
         )
         return terms
@@ -1348,26 +1480,20 @@ class HimGo2Env(ManagerBasedRlEnv):
         # ObservationManager still applies a term's delay buffer.  Build a
         # genuinely clean privileged copy instead of shallow-copying delayed
         # actor terms.  Encoder bias is an actor-side observation effect too.
-        critic_terms = {
-            name: replace(
-                term,
-                noise=None,
-                delay_min_lag=0,
-                delay_max_lag=0,
-                delay_hold_prob=0.0,
-                delay_update_period=0,
-                params=(
-                    {"asset_cfg": joint_cfg}
-                    if name == "joint_pos"
-                    else dict(term.params)
-                ),
-            )
-            for name, term in actor_terms.items()
-        }
-        critic_terms["joint_pos"] = replace(
-            critic_terms["joint_pos"],
-            params={"biased": False, "asset_cfg": joint_cfg},
-        )
+        critic_terms = {}
+        for name, term in actor_terms.items():
+            critic_term = copy.deepcopy(term)
+            critic_term.noise = None
+            critic_term.delay_min_lag = 0
+            critic_term.delay_max_lag = 0
+            critic_term.delay_hold_prob = 0.0
+            critic_term.delay_update_period = 0
+            if name == "joint_pos":
+                critic_term.params = {
+                    "biased": False,
+                    "asset_cfg": joint_cfg,
+                }
+            critic_terms[name] = critic_term
         critic_terms.update({
             "base_lin_vel": ObservationTermCfg(
                 # Use root-link velocity in the body frame.  The XML
@@ -1418,14 +1544,14 @@ class HimGo2Env(ManagerBasedRlEnv):
                 },
             ),
             "base_contact": TerminationTermCfg(
-                func=illegal_contact,
+                func=HimGo2Env._reward_illegal_contact,
                 params={
                     "sensor_name": "base_ground_touch",
                     "force_threshold": 10.0,
                 },
             ),
             "nonfoot_contact": TerminationTermCfg(
-                func=illegal_contact,
+                func=HimGo2Env._reward_illegal_contact,
                 params={
                     "sensor_name": "nonfoot_ground_touch",
                     "force_threshold": 10.0,
@@ -1492,7 +1618,7 @@ rewards = {
 }
 ```
 
-本文件的完整替换代码为了保持“单文件可复制”，借用了 Unitree 的函数命名和函数签名，例如 `track_linear_velocity`、`feet_air_time`、`feet_clearance`、`self_collision_cost` 和 `stand_still`；这只说明注册接口和部分非 tracking term 的参考来源，不能视为所有实现的数值语义都与 Unitree 对齐。tracking 两项明确按 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/legged_gym_go1` 的 legacy 轴语义：线速度只跟踪 xy，角速度只跟踪 yaw。Unitree mjlab 的原 `track_linear_velocity` 还把 z 项合并到 tracking，原 `track_angular_velocity` 还把 xy 项合并到 tracking；本候选则将 z/xy 分别保留为独立的 `lin_vel_z`/`ang_vel_xy` reward term。若以后把奖励拆到独立的 `him_go2/mdp/rewards.py`，可以原样移动这些函数，然后在环境配置中以 `mdp.<function>` 注册，不要再引入 `velocity_mdp` 这个别名。
+本文件的完整替换代码为了保持“单文件可复制”，借用了 Unitree 的函数命名和函数签名，例如 `track_linear_velocity`、`feet_air_time`、`feet_clearance`、`self_collision_cost` 和 `stand_still`；这只说明注册接口和部分非 tracking term 的参考来源，不能视为所有实现的数值语义都与 Unitree 对齐。最终候选的这些自定义 reward 都定义为 `HimGo2Env` 内的 `@staticmethod`，并由 `HimGo2Env.<method>` 注册；不要在同一候选代码块再添加同名模块级 helper。tracking 两项明确按 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/legged_gym_go1` 的 legacy 轴语义：线速度只跟踪 xy，角速度只跟踪 yaw。Unitree mjlab 的原 `track_linear_velocity` 还把 z 项合并到 tracking，原 `track_angular_velocity` 还把 xy 项合并到 tracking；本候选则将 z/xy 分别保留为独立的 `lin_vel_z`/`ang_vel_xy` reward term。只有 `envs_mdp.*` 是可保留的 mjlab 通用 reward term，不属于本项目自定义实现。
 
 本次修订的关键映射如下：
 
@@ -1502,22 +1628,22 @@ rewards = {
 | `tracking_ang_vel` | `track_angular_velocity` | 按 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/legged_gym_go1` 的 legacy 轴语义，只计算 command/actual 的 yaw 误差；Unitree mjlab 原函数还把 xy 项并入 tracking，本候选由独立的 `ang_vel_xy` term 承担 |
 | `lin_vel_z` / `ang_vel_xy` | `lin_vel_z` / `ang_vel_xy` | 补回旧配置中原本非零、但上一版漏注册的两项 |
 | `orientation` | `body_orientation_l2` | 用 projected gravity 的 xy 分量衡量身体倾斜 |
-| `feet_air_time` | `feet_air_time` | 使用 Unitree 的 `threshold`；不再传不存在的 `threshold_min/threshold_max` |
+| `feet_air_time` | `feet_air_time` | 候选选择 Unitree 风格 `threshold=0.4` 与 mode-time `min`；`mean(contact)==0.5` 是四足中恰好两足接触，不是 single stance；legacy 另有 `threshold=0.5`、per-foot first-contact 累加和 xy gate |
 | `foot_clearance` | `feet_clearance` | 直接采用 Unitree 的 foot site 高度与水平速度实现，不把 `height_scan` 误传给官方同名函数 |
-| `collision` | `self_collision_cost` | 使用 `nonfoot_ground_touch` 的 force history 和 `max_contact_force`；candidate 的 `max_contact_force=100` 仅是候选策略值，不等于 legacy contact force `>0.1` 或 Unitree `self_collision` 默认 `10`，runtime 仍为 `NOT_RUN` |
+| `collision` | `self_collision_cost` | 使用 `nonfoot_ground_touch` 的 `force_history=[N, primary, history, 3]`；先按 primary 聚合，再按 history 槽计数，槽数不是接触总数；`max_contact_force=100` 仅是候选策略值，不等于 legacy `>0.1` 或 Unitree 默认 `10`，runtime 仍为 `NOT_RUN` |
 | `stand_still` | `stand_still` | 低速命令时惩罚相对默认姿态的关节误差 |
 | `hip_pos` | `hip_pos` | 修正为 hip 相对默认关节姿态的 L2，不再错误复用 `joint_pos_limits` |
 
-`dof_acc`、`action_rate`、`smoothness`、`torques`、`dof_vel` 和 `dof_pos_limits` 仍显式使用 `envs_mdp` 中的通用 mjlab term；这与 Unitree 的 `mdp/__init__.py` 重新导出通用项的效果相同，但来源更清楚。
+第4节现已把这些项也封装为 `HimGo2Env._reward_*` 静态方法；它们的公式参考 mjlab 通用 term，但 callable 归属仍在本类。特别是 legacy `dof_acc` 是相邻 policy step 的 velocity difference derivative，而 `envs_mdp.joint_acc_l2` 使用 mjlab physics acceleration；二者在时间采样和数值上不等价，候选选择必须记录为语义差异。
 
 ### 4.2 代码中的有意映射
 
 有几个旧配置字段不能机械地一对一搬运：
 
-- `clearance_height_target=-0.2` 是旧项目的高度约定；Unitree 的 `feet_clearance` 直接使用 `site_pos_w`，因此代码把旧值转换为正的 `0.2 m` 目标。这个值训练后仍应调参。
-- 旧的 `torque_limits` 不是一个标准 mjlab reward term；代码使用每个 `IdealPdActuator` 的 `force_limit` 做超限惩罚。物理 actuator 限幅本身仍由 `Go2Asset` 完成。
+- `clearance_height_target=-0.2` 是旧项目的 signed、root-relative 约定；候选 `feet_clearance` 使用 world/site 的绝对高度与水平速度，并用绝对高度误差乘速度，不同于 legacy body-frame、root-relative 的平方高度误差。代码取 `abs(-0.2)` 只是一次明确的语义重映射，不是单位转换；目标仍须通过落地数据校准。
+- 旧的 `torque_limits` 不是一个标准 mjlab reward term；代码使用每个 `IdealPdActuator` 的 `force_limit` 做超限惩罚。`actuator_force` 可能已经是 effort clamp 后的信号，读不到超限值；`soft_limit=1.0` 又没有安全裕量，可能使该项恒为零，必须由 S14 runtime 核验。物理 actuator 限幅本身仍由 `Go2Asset` 完成。
 - `tracking_sigma=0.25` 表示指数跟踪函数的 `std=sqrt(tracking_sigma)`；这与 Unitree 配置中显式写 `math.sqrt(0.25)` 的语义一致。
-- `feet_air_time` 依赖 `feet_ground_contact` 开启 `track_air_time=True`，`collision` 与 `base_contact` 分别依赖接触传感器的 `force_history`；因此这两个 reward/termination 不能只注册函数而不配置对应 sensor field/history。
+- `feet_air_time` 依赖 `feet_ground_contact` 开启 `track_air_time=True`，`collision` 与 `base_contact` 分别依赖接触传感器的 `force_history`。候选 force history 的轴契约是 `[N, primary, history, 3]`；`primary` 是匹配的 geom/body，`history` 是历史样本槽，最后一轴是三维力，不能把 history 槽数量说成接触总数。因此这些 reward/termination 不能只注册函数而不配置对应 sensor field/history。
 - candidate 配置中的 `max_contact_force=100.0` 仅是 collision 的候选策略值，不等于 legacy contact force `>0.1`，也不等于 Unitree `self_collision` 默认 `10`；collision runtime 仍为 `NOT_RUN`。
 - `terrain_proportions` 没有直接传进 `ROUGH_TERRAINS_CFG`。官方 rough preset 已经提供非空的 `sub_terrains`；curriculum 模式按这些子地形类型生成列。若必须复现旧的五比例地形，需要在代码中显式构造每个 `SubTerrainCfg`，不能保留空字典。
 - 当前仓库配置中的 restitution、payload mass 和部分 latency 字段没有在本文件中伪造为不存在的事件。它们应分别映射到 `dr` 中对应的 model field 或显式 sensor/action delay；先保证主环境和 shape contract 可运行。
@@ -1736,9 +1862,9 @@ PY
 
 | 层 | 当前事实 | 状态 |
 |---|---|---|
-| Python 入口 | `him_go2_env.py:83` 为 `recorders = ,` | 阻断 import |
+| Python 入口 | `him_go2_env.py:96` 为 `recorders = ,`；同一构造的 `him_go2_env.py:98` 为 `metrics =` | 阻断 import |
 | Asset | `Go2Asset._parse_cfg()` 在 `self.entity` 创建前访问 `self.robot_cfg`/`self.asset` | 阻断构造 |
-| Manager | builder 的参数签名、`MujocoCfg.integrator`、actions 字段、command range 均有错配 | 未对齐 |
+| Manager | builder 的参数签名、`MujocoCfg.integrator`、actions 字段、command range 均有错配；当前定义锚点为 scene `:101`、events `:228`、commands `:349`、observations `:410`、terminations `:449`、curriculum `:461`、rewards `:399-408` | 未对齐 |
 | Registry → Env | `task_registry.py:201` 传 `device=...`，而当前 `HimGo2Env.__init__` 仍只接收 `sim_device` | P0 构造阻断 |
 | Action order | 当前配置 dict 是“按关节类型分组”的插入顺序；部署是 leg-major `FL, RL, FR, RR`；XML runtime 是 leg-major `FL, FR, RL, RR`；当前源码没有可直接复用的唯一重排表 | 文档候选以 canonical joint order 为契约，通过 `_joint_names()` 与四个分腿 action term 固定 `FL,RL,FR,RR × hip,thigh,calf` 的策略顺序；仍需 P0 round-trip 验证 |
 | Effort/clip | 仿真 calf 为 `45 N*m`，部署为 `35.55 N*m`；当前 action clip 字段也不合法 | P0 安全阻断 |
@@ -1765,12 +1891,12 @@ PY
 | `lin_vel_z` | `-1.5` | `lin_vel_z` | robot root body z 速度的独立惩罚；当前未注册 |
 | `ang_vel_xy` | `-0.05` | `ang_vel_xy` | robot root body xy 角速度的独立惩罚；当前未注册 |
 | `orientation` | `-0.2` | `body_orientation_l2`/`flat_orientation_l2` | projected gravity；当前未注册 |
-| `dof_acc` | `-2.5e-7` | `envs_mdp.joint_acc_l2` | 12 joint order；当前未注册 |
+| `dof_acc` | `-2.5e-7` | `HimGo2Env._reward_dof_acc` | 12 joint order；当前未注册 |
 | `joint_power` | `-2e-5` | 自定义 `_joint_power_l1` | 需要 actuator force 与 joint velocity；当前未注册 |
 | `base_height` | `-1.0` | 自定义 `_base_height_l2` | `height_scan` 有效命中的 terrain-relative measured height 均值与 target `0.30`；当前未注册 |
 | `foot_clearance` | `-0.01` | 自定义 `feet_clearance` | 四个 foot site；当前未注册 |
-| `action_rate` | `-0.01` | `envs_mdp.action_rate_l2` | action manager history；当前未注册 |
-| `smoothness` | `-0.01` | `envs_mdp.action_acc_l2` | 二阶 action history；当前未注册 |
+| `action_rate` | `-0.01` | `HimGo2Env._reward_action_rate` | action manager history；当前未注册 |
+| `smoothness` | `-0.01` | `HimGo2Env._reward_smoothness` | 二阶 action history；当前未注册 |
 | `feet_air_time` | `+0.1` | `feet_air_time` | `track_air_time=True` contact sensor；当前未注册 |
 | `collision` | `-0.5` | `self_collision_cost`/illegal contact cost | non-foot force history；当前未注册 |
 | `feet_stumble` | `-0.0` | 不注册 | 当前权重为零；没有可宣称的活动 term |
@@ -1806,7 +1932,7 @@ PY
 
 | flag | legacy 范围 | mjlab 1.6.0 映射 | 生命周期 | 当前状态 |
 |---|---|---|---|---|
-| `randomize_payload_mass` | `[-2.5,2.5] kg` | `dr.body_mass` 对 `base_link`，`operation="add"` | `reset` 或 `startup` | 当前是 `pass`，未接入；候选已显式注册，但未运行证明 |
+| `randomize_payload_mass` | `[-2.5,2.5] kg` | `dr.body_mass` 对 `base_link`，`operation="add"` | `reset` 或 `startup` | 当前是 `pass`（`him_go2_env.py:283-284`），未接入；候选已显式注册，但未运行证明 |
 | `randomize_link_mass` | `[0.9,1.1]` ratio | `dr.body_mass`，`operation="scale"` | `startup`/`reset` | 配置声明，当前未接入；只改 mass，不等价于同步 inertia |
 | `randomize_com_displacement` | `[-0.05,0.05] m` | `dr.body_com_offset` 的 x/y/z | `startup`/`reset` | 候选事件，未运行证明，未放行 |
 | `randomize_joint_friction` | `[0.01,1.15]` | `dr.joint_friction` | `startup`/`reset` | 候选事件，未运行证明，未放行 |
@@ -1908,7 +2034,7 @@ PY
 
 | 证据项 | 状态 | 固定登记（HEAD、版本、入口） | 复现边界 |
 |---|---|---|---|
-| 当前项目 | `PASS` | `/home/kk/legged_mjlab` HEAD `cd993ee2936f18c18b44a554315097029a80a3cc` | 只固定源码锚点，不替代运行验证 |
+| 当前项目 | `PASS` | `/home/kk/legged_mjlab` HEAD `8dbfbd66a57a495cb249b634b259c2d91e6aecfd`（旧值仅作为历史审计基线记录） | 只固定源码锚点，不替代运行验证 |
 | `AMP_mjlab` | `PASS` | HEAD `6c7a2947fccc973e4af8e6d90e550400f1b6fcfc`；root setup pin：`mjlab==1.2.0`、`mujoco-warp==3.8.1`、`warp-lang==1.12.0`、`rsl-rl-lib==2.3.1`；注册 `src/tasks/amp_loco/config/g1/__init__.py:1-23`；runner `src/tasks/amp_loco/rl/runner.py:12,65-115` | 参考入口，不是当前 mjlab v1.6.0 运行证据 |
 | `unitree_rl_mjlab` | `PASS` | HEAD `1425b15f73bd4095f0df53709d7c389c3eb9e790`；pin：`mjlab==1.2.0`、`mujoco-warp==3.5.0`；Go2 注册 `src/tasks/velocity/config/go2/__init__.py:1-23` | 不是 v1.6 证据，只能作迁移组织参考 |
 | `HIMLoco` | `BLOCKED` | 无可验证 `.git` commit；`legged_gym==1.0.0`、本地 `rsl_rl==1.0.2`；训练入口 `legged_gym/legged_gym/scripts/train.py`，play 入口 `legged_gym/legged_gym/scripts/play.py:27-30` | play 在 `:29` 硬编码 checkpoint，来源与结果不可复现，风险未解除 |
@@ -2467,8 +2593,6 @@ class Go2Asset:
 ~~~python
 """Play a checkpoint with the configured HIM Go2 environment."""
 
-from __future__ import annotations
-
 import argparse
 from pathlib import Path
 
@@ -2614,8 +2738,6 @@ if __name__ == "__main__":
 ~~~python
 """TorchScript exporter for the local HIM actor and estimator."""
 
-from __future__ import annotations
-
 import argparse
 from pathlib import Path
 
@@ -2742,7 +2864,7 @@ if __name__ == "__main__":
 | 文档 E 的 exporter finite/传播边界 | 静态检查确认有限 action 才走 clamp，NaN/Inf 经 `torch.where` 沿 `raw_actions` 原值传播，export-time check 会拒绝非有限样本 | 只是静态候选保护；不等于导出运行时或部署故障注入已验证，不能替代 runtime S14/S17/S18 |
 | 1-env CPU 尝试 | 把 Warp kernel cache 指向 `/tmp` 后进入 CPU kernel 编译；当前环境报告无 CUDA driver | 没有得到 reset/step 的 `[N,45]`/`[N,239]` 运行断言，S4/S5 仍未通过 |
 | 现有 CPU shape smoke test（第 6.3 节） | 只执行 `reset()` 与 `step(zeros)` 的 shape/返回值检查，未注入接触 | 不能证明 `nonfoot_ground_touch` 的 thigh/calf/base 终止路径；后续必须分别注入 thigh、calf、base 接触并断言 `terminated=True`、`truncated=False`，另行触发 timeout 并断言 `terminated=False`、`truncated=True` |
-| 当前工作树 | `git diff --name-only -- '*.py'` 为空；`him_go2_env.py:83` 仍是 `recorders = ,` | 不能 import 当前 `him_go2`，也不能触发 `[ALL_TESTS_PASSED]` |
+| 当前工作树 | `git diff --name-only -- '*.py'` 为空；`him_go2_env.py:96` 仍是 `recorders = ,`，同一构造中的 `him_go2_env.py:98` 为 `metrics =` | 不能 import 当前 `him_go2`，也不能触发 `[ALL_TESTS_PASSED]` |
 
 `auto_reset=False`、custom actuator finite guard 和 exporter 的 `torch.where`/export-time finite check 目前都只有静态候选保护证据；它们不能替代 runtime S14、S17、S18，也不能把 clamp 或静态检查解释为硬件 fail-safe。
 
@@ -2778,19 +2900,19 @@ if __name__ == "__main__":
 | reward | 候选选择 | 参考来源 | 状态 |
 |---|---|---|---|
 | `only_positive_rewards` | `super().step()` 后对汇总 reward 执行 `clamp_min(0)` | legacy `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/base/legged_robot.py:1299-1305` 先 clamp、再追加 termination reward；该顺序需 runtime 决策 | `NOT_RUN` |
-| `feet_air_time` | 沿候选/Unitree：threshold `0.4`，single-stance 后取 mode time 的 `min` | Unitree `/home/kk/github/unitree_rl_mjlab/src/tasks/velocity/mdp/rewards.py:134-159`；legacy Go1 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/base/him_legged_robot.py:1555-1566` 为 `0.5`、first-contact 后按 per-foot 累加 | `NOT_RUN` |
-| `collision` | candidate contact sensor `history_length=4`；对各 physics substep 的 `force_history` 先按接触项聚合，再按历史槽计数；`max_contact_force=100` 仅为候选策略值 | candidate `/home/kk/legged_mjlab/docs/him_go2_env_续写与外部_rsl_rl_接入.md:292-305,643-674,1226-1234`；legacy Go1 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/base/him_legged_robot.py:1532-1534` 使用当前接触力且阈值 `>0.1`；Unitree `/home/kk/github/unitree_rl_mjlab/src/tasks/velocity/mdp/rewards.py:87-106` 的默认 `self_collision` 阈值为 `10` | `NOT_RUN` |
+| `feet_air_time` | 沿候选/Unitree：threshold `0.4`，进入 two-contact mode（恰好两足接触）后取四足 mode time 的 `min` | Unitree `/home/kk/github/unitree_rl_mjlab/src/tasks/velocity/mdp/rewards.py:134-159`；legacy Go1 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/base/him_legged_robot.py:1555-1566` 为 `0.5`、first-contact 后按 per-foot 累加 | `NOT_RUN` |
+| `collision` | candidate contact sensor `history_length=4`；`force_history` 的 H=4 是 physics-history 槽计数而非 contact total，先按接触项聚合，再按历史槽计数；`max_contact_force=100` 仅为候选策略值 | candidate 本文第4节唯一完整候选的 `HimGo2Env._reward_collision` 实现（见第4节）；legacy Go1 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/base/him_legged_robot.py:1532-1534` 使用当前接触力且阈值 `>0.1`；Unitree `/home/kk/github/unitree_rl_mjlab/src/tasks/velocity/mdp/rewards.py:87-106` 的默认 `self_collision` 阈值为 `10` | `NOT_RUN` |
 | `stand_still` | 关节误差的平方 L2 范数/平方和，并含 `xy` 速度与 yaw 速度的 gate | legacy Go1 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/base/him_legged_robot.py:1573-1575` 为 L1，且只使用 `xy` gate | `NOT_RUN` |
 | `hip_pos` | 相对 default pose 的平方 L2 范数/平方和，无 command gate | legacy Go1 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/base/him_legged_robot.py:1581-1583` 为 zero-target，并带 command gate | `NOT_RUN` |
-| `foot_clearance` | candidate 使用 world/site height（`site_pos_w[..., 2]`）、world/site 水平速度（`site_lin_vel_w[..., :2]`）、高度绝对误差，并带 command gate | candidate `/home/kk/legged_mjlab/docs/him_go2_env_续写与外部_rsl_rl_接入.md:394-416`；Unitree `/home/kk/github/unitree_rl_mjlab/src/tasks/velocity/mdp/rewards.py:163-185`；legacy HIM Go1 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/base/him_legged_robot.py:1503-1514` 使用 body-frame、relative-to-root 的高度/速度、平方高度误差且无 gate | `NOT_RUN` |
-| `dof_acc` | candidate 直接注册 mjlab `joint_acc_l2` | candidate `/home/kk/legged_mjlab/docs/him_go2_env_续写与外部_rsl_rl_接入.md:1161-1166`；legacy HIM Go1 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/base/him_legged_robot.py:128,1490-1492` 用相邻 policy-step 的 velocity difference 除以 `self.dt`，时间离散不同 | `NOT_RUN` |
-| `torque_limits` | candidate 对归一化超限量取平方后求和 | candidate `/home/kk/legged_mjlab/docs/him_go2_env_续写与外部_rsl_rl_接入.md:448-471,1268-1276`；legacy HIM Go1 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/base/him_legged_robot.py:1551-1553` 对原始 torque 超限量作线性和 | `NOT_RUN` |
+| `foot_clearance` | candidate 使用 world/site height（`site_pos_w[..., 2]`）、world/site 水平速度（`site_lin_vel_w[..., :2]`）、高度绝对误差，并带 command gate | candidate 本文第4节唯一完整候选的 `HimGo2Env._reward_foot_clearance` 实现（见第4节）；Unitree `/home/kk/github/unitree_rl_mjlab/src/tasks/velocity/mdp/rewards.py:163-185`；legacy HIM Go1 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/base/him_legged_robot.py:1503-1514` 使用 body-frame、relative-to-root 的高度/速度、平方高度误差且无 gate | `NOT_RUN` |
+| `dof_acc` | candidate 注册类内 `HimGo2Env._reward_dof_acc`，其实现读取 mjlab physics `joint_acc` | candidate 本文第4节唯一完整候选的 `HimGo2Env._reward_dof_acc` 实现（见第4节）；legacy HIM Go1 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/base/him_legged_robot.py:128,1490-1492` 用相邻 policy-step 的 velocity difference 除以 `self.dt`，时间离散不同 | `NOT_RUN` |
+| `torque_limits` | candidate 对归一化超限量取平方后求和 | candidate 本文第4节唯一完整候选的 `HimGo2Env._reward_torque_limits` 实现（见第4节）；legacy HIM Go1 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/base/him_legged_robot.py:1551-1553` 对原始 torque 超限量作线性和 | `NOT_RUN` |
 
 状态枚举仅允许 `PASS/FAIL/BLOCKED/NOT_RUN/UNSAFE`。
 
 - `PASS` 仅表示该项证据已完成且满足契约。
 - `FAIL`、`BLOCKED`、`NOT_RUN`、`UNSAFE` 都不是放行状态。
-- 若任一上游依赖失败，所有下游依赖项禁止标记为 `PASS`，只能标为 `BLOCKED` 或 `NOT_RUN`；修复根因后必须重新运行整条依赖链。
+- 若任一上游依赖失败，所有下游依赖项禁止标记为 `PASS`，只能使用单值非 `PASS` 状态，具体值按依赖证据填写；修复根因后必须重新运行整条依赖链。
 
 迁移 checklist（8 项）：
 
@@ -2815,50 +2937,50 @@ P1 安装入口矛盾必须单独记录：根 `setup.py`、`docs/uv使用.md` �
 |---|---|---|---|
 | 安装入口与依赖来源 | `FAIL` | 根 `setup.py` pin 了 `mjlab==1.6.0`、`mujoco-warp==3.11.0`，同时把仓库内 `rsl_rl` 纳入根包；独立 `rsl_rl/setup.py` 也分发同名 `rsl_rl`。`docs/setup.md` 连续安装 `./rsl_rl` 与 `.`。`docs/uv使用.md` 要求根 `pyproject.toml`/`uv sync`，但当前根目录没有 `pyproject.toml`、`uv.lock` 或 `requirements/`，因此安装入口不可复现。 | `setup.py:7-26`；`rsl_rl/setup.py:3-15`；`docs/setup.md:23-32`；`docs/uv使用.md:79-100`；`pyproject.toml`、`uv.lock`、`requirements/`：不存在（无文件行号） |
 | task registry 与环境构造 | `FAIL` | registry 传 `device`，当前 `HimGo2Env` 构造仍接收 `sim_device`，且 `render_mode` 无默认值；按当前调用会在进入有效环境前失败。 | `legged_mjlab/utils/task_registry.py:201-212`；`legged_mjlab/envs/him_go2/him_go2_env.py:41-60` |
-| 当前源码可解析性 | `FAIL` | `ManagerBasedRlEnvCfg` 构造中的 `recorders = ,` 是语法错误；不能据此宣称 import、reset 或 step 已通过。 | `legged_mjlab/envs/him_go2/him_go2_env.py:65-85`，尤其 `:83` |
+| 当前源码可解析性 | `FAIL` | `ManagerBasedRlEnvCfg` 构造中的 `:96 recorders = ,` 与 `:98 metrics =` 均为语法错误；不能据此宣称 import、reset 或 step 已通过。 | `legged_mjlab/envs/him_go2/him_go2_env.py:67-99`，错误在 `:96 recorders = ,` 与 `:98 metrics =` |
 | play/export 入口 | `FAIL` | `play.py` 为空文件（0 行、0 bytes）；`exporter.py` 仅含 1 个空行（1 byte），当前没有可执行回放或导出入口。 | `legged_mjlab/scripts/play.py:0（空文件）`；`legged_mjlab/utils/exporter.py:1（空行）` |
-| 运行环境与 CPU gate | `BLOCKED` | `nvidia-smi` 当前报告无法与 NVIDIA driver 通信；CPU `reset()`/`step()` 本轮未运行，不能形成 shape/finite 证据。 | `nvidia-smi` 当前输出；`docs/him_go2_env_续写与外部_rsl_rl_接入.md:2806` |
-| 配置声明与实际实现 | `FAIL` | 配置打开了 motor-strength、观测/动作 delay 等随机化，并声明了 termination/reward 项；源码对 payload 随机化仍为 `pass`，资产只创建普通 `IdealPdActuatorCfg`，终止管理器实际只返回 timeout，未落地声明的接触/故障终止。 | `legged_mjlab/envs/him_go2/him_go2_config.py:151-168,174-205`；`legged_mjlab/envs/him_go2/him_go2_env.py:270-272,437-447`；`legged_mjlab/envs/him_go2/go2_asset.py:127-164` |
-| play 隔离 | `BLOCKED` | `play` 虽进入环境构造，但 manager builder 调用 `_build_events()`、`_build_observations()`、`_build_curriculum()` 时未传 `play`，与这些函数的签名不一致；不能证明 play 已关闭 DR、push、noise、delay、hold 和 curriculum。 | `legged_mjlab/envs/him_go2/him_go2_env.py:62-83,216,398,449` |
+| 运行环境与 CPU gate | `BLOCKED` | `nvidia-smi` 当前报告无法与 NVIDIA driver 通信；CPU `reset()`/`step()` 本轮未运行，不能形成 shape/finite 证据。 | `nvidia-smi` 当前输出；审计命令 `nvidia-smi` 当前无法与 NVIDIA driver 通信（命令输出，无文件行号） |
+| 配置声明与实际实现 | `FAIL` | 配置打开了 motor-strength、观测/动作 delay 等随机化，并声明了 termination/reward 项；源码对 payload 随机化仍为 `pass`，资产只创建普通 `IdealPdActuatorCfg`，终止管理器实际只返回 timeout，未落地声明的接触/故障终止。 | `legged_mjlab/envs/him_go2/him_go2_config.py:151-168,174-205`；payload `legged_mjlab/envs/him_go2/him_go2_env.py:283-284`；timeout-only termination `legged_mjlab/envs/him_go2/him_go2_env.py:454-459`；`legged_mjlab/envs/him_go2/go2_asset.py:127-164` |
+| play 隔离 | `BLOCKED` | `play` 虽进入环境构造，但 manager builder 调用 `_build_events()`、`_build_observations()`、`_build_curriculum()` 时未传 `play`，与这些函数的签名不一致；不能证明 play 已关闭 DR、push、noise、delay、hold 和 curriculum。 | 调用点 `legged_mjlab/envs/him_go2/him_go2_env.py:69-95`；函数定义 `_build_events:228`、`_build_observations:410`、`_build_curriculum:461` |
 | wrapper finite check 的安全边界 | `UNSAFE` | wrapper 只在收到动作后以 `FloatingPointError` 拒绝 NaN/Inf；这不是硬件 fail-safe，也没有证明输出抑制、通信监督或安全停机。 | `legged_mjlab/wrappers/him_wrapper.py:210-228,388-397` |
 | 仿真/部署 effort 一致性 | `FAIL` | 仿真配置 calf effort 为 `45 N·m`，部署 YAML 的 calf torque limit 为 `35.55 N·m`，两者不一致。 | `legged_mjlab/envs/him_go2/him_go2_config.py:77-84`；`deploy/deploy_mujoco/him_go2/policy/config.yaml:31-34` |
 | 部署 fail-safe 基础设施 | `UNSAFE` | 当前没有 communication watchdog、sensor-disconnect handling、output suppression、safe-stop 或可审计故障记录；没有部署放行证据。 | `deploy/deploy_mujoco/him_go2/src/library/fsm/fsm.py:1-164`（仅为通用 FSM，未提供上述链路）；`deploy/deploy_mujoco/him_go2/policy/config.yaml:1-54`；全树关键字核验无对应实现 |
-| 文档候选代码边界 | `NOT_RUN` | 第 4 节候选环境、full exporter、custom actuator 和 contact termination 只是待落地方案；候选代码、静态 finite guard 或文档 smoke test 均不能改写为当前源码已实现。 | `docs/him_go2_env_续写与外部_rsl_rl_接入.md:2412-2414,2654-2656,2664,2672-2674,2690-2691` |
+| 文档候选代码边界 | `NOT_RUN` | 第 4 节候选环境、full exporter、custom actuator 和 contact termination 只是待落地方案；候选代码、静态 finite guard 或文档 smoke test 均不能改写为当前源码已实现。 | 本文第4节/第9.6节候选代码 |
 
 阻断清单：
 
 - `BLOCKED`：安装入口必须先统一根 `setup.py`、独立 `rsl_rl/setup.py` 与 `uv` 文档的唯一来源；在根项目元数据缺失且存在同名分发冲突时，不得启动训练或部署。
 - `FAIL`：必须先修复当前 `HimGo2Env` 的参数契约与 `recorders` 语法错误；本节不修改源文件。
-- `NOT_RUN`：CPU reset/step、S14 effort/finite safety、S16 termination latency、S17 play isolation、S18 deploy fail-safe 均没有当前运行证据；其中 S14、S16、S17、S18 只能标为 `NOT_RUN` 或 `BLOCKED`，不能标为 `PASS`。
+- `NOT_RUN`：CPU reset/step、S14 effort/finite safety、S16 termination latency、S17 play isolation、S18 deploy fail-safe 均没有当前运行证据；S14、S16、S17、S18 均未通过，具体单值状态以第10节表格为准；不得标为 `PASS`。
 - `UNSAFE`：在补齐 finite reject、输出抑制、通信 watchdog、传感器断连处理、安全停机和可审计故障记录，并统一 calf effort 上限前，禁止把任何 exporter/actuator 候选或 clamp 当作硬件 fail-safe。
 
 ### 9.10.1 文档质量与待核验补充
 
-9.1/9.2 是叙述性状态，严格的单值枚举仅适用于 9.3.1、9.9、9.10。`docs/setup.md:27-32,36-45` 的 shell fence 误标为 Python，属于文档质量 `FAIL`；本文 11 个 candidate Python fence 虽已通过 AST 解析，仍不代表源码可运行。collision candidate 的 `force_history` slot/contact-item 轴及 `any(dim=...)` 的物理时间聚合，必须在真实 `ContactSensor` 的 S6/S14 runtime 中核验，状态为 `NOT_RUN`；`torque_limits` candidate 读取的是已限幅的 `actuator_force`，因此 `soft_torque_limit=1.0` 的惩罚有效性也必须 runtime 核验，状态为 `NOT_RUN`。130/130 字段验证仅是文档覆盖率，不是 runtime 生效；最小只读核对沿用现有 9.2 矩阵，并逐项对照 `him_go2_env.py:8-226`。本补充不改变 `[ALL_TESTS_PASSED]` 缺失、S0 `FAIL` 及所有 runtime 阻断状态。
+9.1/9.2 是叙述性状态，严格的单值枚举仅适用于 9.3.1、9.9、9.10。`docs/setup.md:27-32,36-45` 的 shell fence 误标为 Python，属于文档质量 `FAIL`；第4节完整候选通过 AST；第12节无可执行 Python fence；将缩进片段复制到 class 外不能独立解析。collision candidate 的 `force_history` slot/contact-item 轴及 `any(dim=...)` 的物理时间聚合，必须在真实 `ContactSensor` 的 S6/S14 runtime 中核验，状态为 `NOT_RUN`；`torque_limits` candidate 读取的是已限幅的 `actuator_force`，因此 `soft_torque_limit=1.0` 的惩罚有效性也必须 runtime 核验，状态为 `NOT_RUN`。130/130 字段验证仅是文档覆盖率，不是 runtime 生效；最小只读核对沿用现有 9.2 矩阵，并逐项对照 `him_go2_env.py:8-226`。本补充不改变 `[ALL_TESTS_PASSED]` 缺失、S0 `FAIL` 及所有 runtime 阻断状态。
 
 ## 10. 最终验证矩阵与阻断规则
 
-| 阶段 | 检查 | 预期证据 | 失败处理 |
-|---|---|---|---|
-| S0 | `python -m py_compile` 目标 Python 文件 | 无 SyntaxError | 修复文档候选代码；当前源码已知失败 |
-| S1 | `import legged_mjlab.envs` | task 注册成功 | 检查 `recorders`、循环 import、rsl 来源 |
-| S2 | `Go2Asset(cfg)` + `MjSpec.from_file` | XML、joint、actuator、sensor 名称解析成功 | 对照 `go2.xml:41-159`；禁止猜名 |
-| S3 | manager config build | `integrator` 是字符串，gravity 是三元组，非空 terrain | 检查所有 builder 参数和 v1.6 dataclass 字段 |
-| S4 | 4 env CPU `reset()` | actor `[4,45]`、native critic `[4,239]` | 检查 term 顺序/传感器匹配 |
-| S5 | 4 env CPU `step(zeros)` | history `[4,270]`、critic `[4,239]`、reward `[4]`、terminated/truncated `[4]` | 检查 action dim、finite、dt |
-| S6 | reward audit | 非零 scale 全部出现在 manager，零 scale 不出现；每项输出 `[4]` | 逐项补 term 或明确禁用 |
-| S7 | event audit | startup/reset/interval 事件按 flag 生效，play 关闭 push/DR | 检查 model field 与随机化前后差异 |
-| S8 | partial reset | 只 reset done env，其他 env 的 command/history/timer 不变 | 这是 v1.6 partial-reset gate |
-| S9 | HIM adapter | wrapper 返回 239，runner 显式消费 48，terminal obs 只替换 done 行 | 任何 silent truncate 都是 blocker |
-| S10 | one-iteration HIM PPO | estimator/optimizer/storage 无 shape 或 NaN 错误 | 先确认 `rsl_rl.__file__` 是项目 backend |
-| S11 | play | `play=True` 无 curriculum/push/noise，checkpoint 可加载 | 当前 `play.py` 为空，未通过前不能宣称可回放 |
-| S12 | export/deploy | 导出输入维度、joint order、action scale/clip/delay 与部署一致 | 当前没有 Go2 HIM 的已验证导出 artifact |
-| S13 | action round-trip | policy/deploy canonical joint order 与 XML runtime actuator/joint 映射逐关节一致；零动作和单位脉冲均落到预期电机 | 任一腿/关节错位都是 Critical blocker |
-| S14 | effort/finite safety | exporter/actuator 的静态 finite guard 已存在；runtime 仍须证明每个 physics substep 的 torque/action 无 NaN/Inf，仿真与部署 effort clip 一致，calf 不超过 `35.55 N*m` | 静态 guard 或 clamp 不能写成硬件 fail-safe；部署 adapter 仍须 finite reject 并抑制非有限输出，任一越界或 runtime finite 检查缺失都不放行 |
-| S15 | reset/settle | 记录 `base z`、四足高度、接触力、第一步 impulse；零动作 settle 不穿透、不异常弹跳 | 失败则关闭 push/DR，回到初始姿态修正 |
-| S16 | termination latency | 第 6.3 节 smoke test 不能证明该路径；后续必须分别注入 thigh、calf、base 接触，每次都断言一个 policy step 内 `terminated=True` 且 `truncated=False`，并确认不再执行危险动作；另行触发 timeout，断言 `terminated=False` 且 `truncated=True` | 未完成接触注入与 `terminated`/`truncated` 分别断言，或把 timeout 当作 failure termination，均是 blocker |
-| S17 | play isolation | `play=True` 明确关闭 push、DR、noise、随机延迟、action hold、curriculum，并固定 reset 位姿 | 任一随机化残留都不得用于部署回放结论 |
-| S18 | deploy fail-safe | exporter/actuator 的静态保护已存在，但仍须对 NaN/Inf、通信超时/断连、传感器断连/故障和 checkpoint 输出异常做故障注入；deployment adapter 必须 finite reject、抑制输出、运行 watchdog，并进入安全停机、记录原因 | 缺少 finite reject、输出抑制、watchdog、断连/传感器故障注入或可审计的安全停机日志，S18 失败；exporter/actuator 静态保护或 clamp 不得当作硬件 fail-safe |
+| 阶段 | 检查 | 预期证据 | 失败处理 | 当前状态 |
+|---|---|---|---|---|
+| S0 | `python -m py_compile` 目标 Python 文件 | 无 SyntaxError | 修复文档候选代码；当前源码已知失败 | FAIL |
+| S1 | `import legged_mjlab.envs` | task 注册成功 | 检查 `recorders`、循环 import、rsl 来源 | BLOCKED |
+| S2 | `Go2Asset(cfg)` + `MjSpec.from_file` | XML、joint、actuator、sensor 名称解析成功 | 对照 `go2.xml:41-159`；禁止猜名 | BLOCKED |
+| S3 | manager config build | `integrator` 是字符串，gravity 是三元组，非空 terrain | 检查所有 builder 参数和 v1.6 dataclass 字段 | BLOCKED |
+| S4 | 4 env CPU `reset()` | actor `[4,45]`、native critic `[4,239]` | 检查 term 顺序/传感器匹配 | BLOCKED |
+| S5 | 4 env CPU `step(zeros)` | history `[4,270]`、critic `[4,239]`、reward `[4]`、terminated/truncated `[4]` | 检查 action dim、finite、dt | BLOCKED |
+| S6 | reward audit | 非零 scale 全部出现在 manager，零 scale 不出现；每项输出 `[4]` | 逐项补 term 或明确禁用 | FAIL |
+| S7 | event audit | startup/reset/interval 事件按 flag 生效，play 关闭 push/DR | 检查 model field 与随机化前后差异 | FAIL |
+| S8 | partial reset | 只 reset done env，其他 env 的 command/history/timer 不变 | 这是 v1.6 partial-reset gate | NOT_RUN |
+| S9 | HIM adapter | wrapper 返回 239，runner 显式消费 48，terminal obs 只替换 done 行 | 任何 silent truncate 都是 blocker | NOT_RUN |
+| S10 | one-iteration HIM PPO | estimator/optimizer/storage 无 shape 或 NaN 错误 | 先确认 `rsl_rl.__file__` 是项目 backend | NOT_RUN |
+| S11 | play | `play=True` 无 curriculum/push/noise，checkpoint 可加载 | 当前 `play.py` 为空，未通过前不能宣称可回放 | FAIL |
+| S12 | export/deploy | 导出输入维度、joint order、action scale/clip/delay 与部署一致 | 当前没有 Go2 HIM 的已验证导出 artifact | FAIL |
+| S13 | action round-trip | policy/deploy canonical joint order 与 XML runtime actuator/joint 映射逐关节一致；零动作和单位脉冲均落到预期电机 | 任一腿/关节错位都是 Critical blocker | BLOCKED |
+| S14 | effort/finite safety | exporter/actuator 的静态 finite guard 已存在；runtime 仍须证明每个 physics substep 的 torque/action 无 NaN/Inf，仿真与部署 effort clip 一致，calf 不超过 `35.55 N*m` | 静态 guard 或 clamp 不能写成硬件 fail-safe；部署 adapter 仍须 finite reject 并抑制非有限输出，任一越界或 runtime finite 检查缺失都不放行 | UNSAFE |
+| S15 | reset/settle | 记录 `base z`、四足高度、接触力、第一步 impulse；零动作 settle 不穿透、不异常弹跳 | 失败则关闭 push/DR，回到初始姿态修正 | NOT_RUN |
+| S16 | termination latency | 第 6.3 节 smoke test 不能证明该路径；后续必须分别注入 thigh、calf、base 接触，每次都断言一个 policy step 内 `terminated=True` 且 `truncated=False`，并确认不再执行危险动作；另行触发 timeout，断言 `terminated=False` 且 `truncated=True` | 未完成接触注入与 `terminated`/`truncated` 分别断言，或把 timeout 当作 failure termination，均是 blocker | FAIL |
+| S17 | play isolation | `play=True` 明确关闭 push、DR、noise、随机延迟、action hold、curriculum，并固定 reset 位姿 | 任一随机化残留都不得用于部署回放结论 | BLOCKED |
+| S18 | deploy fail-safe | exporter/actuator 的静态保护已存在，但仍须对 NaN/Inf、通信超时/断连、传感器断连/故障和 checkpoint 输出异常做故障注入；deployment adapter 必须 finite reject、抑制输出、运行 watchdog，并进入安全停机、记录原因 | 缺少 finite reject、输出抑制、watchdog、断连/传感器故障注入或可审计的安全停机日志，S18 失败；exporter/actuator 静态保护或 clamp 不得当作硬件 fail-safe | UNSAFE |
 
 本轮没有执行上述运行验证，也没有触发 `[ALL_TESTS_PASSED]`。因此项目当前仍停在“文档化实现候选 + 静态审计”阶段，不能发布为可训练版本。
 
@@ -2874,3 +2996,271 @@ P1 安装入口矛盾必须单独记录：根 `setup.py`、`docs/uv使用.md` �
 6. 最后验证 partial reset、HIM PPO、checkpoint、play、ONNX/部署与 S18 故障注入，不得把训练曲线正常当作接口验证。
 
 回滚策略是恢复三个目标 Python 文件到修改前版本，保留本文档作为手工迁移说明；不要用 `git reset --hard` 清理工作树，也不要删除未确认属于用户的文件。部署放行前必须同时满足：所有 S0–S18 有证据、`[ALL_TESTS_PASSED]`、动作范围/关节顺序/延迟单位与真实控制器签字确认。
+
+## 12. 候选方案 C：奖励函数全部定义在 HimGo2Env 类内
+
+本节是对前文候选代码的一个“类内实现”变体，服务于明确约束：所有会作为
+RewardTermCfg.func 注册的 reward callable 都必须是 HimGo2Env 的静态方法。前文
+的类外函数和本节的函数不能同时注册同一个 term；若采用本节，按本节的
+_build_rewards 替换前文对应注册块即可。本节仍然只修改本文档，不修改任何
+Python 文件，也没有声称 import、manager 构造或 runtime reward 已通过。
+
+### 12.1 已核实事实与接口契约
+
+当前工作树中的事实如下。
+
+| 事实 | 证据 | 对候选实现的约束 |
+|---|---|---|
+| HimGo2RoughCfg.rewards.scales 有 17 个非零项，termination 是 -0.0 | legged_mjlab/envs/him_go2/him_go2_config.py:174-205 | 只把非零项放进 active terms；termination 方法可以存在但默认不注册 |
+| HimGo2Env._build_rewards 当前构造空 terms 并返回 | legged_mjlab/envs/him_go2/him_go2_env.py:399-408 | 本节只设计替换后的 builder，不把文档候选描述成当前已接入 |
+| 源码已有一组奖励函数，但函数体首参写成 env，未加 self 或 staticmethod | legged_mjlab/envs/him_go2/him_go2_env.py:488-697 | 类内函数必须加 @staticmethod；注册时传 HimGo2Env._reward_xxx，不能传会绑定 self 的实例方法 |
+| 已安装 mjlab 为 1.6.0 | .venv/lib/python3.11/site-packages/mjlab | term callable 最终以 func(env, **params) 调用 |
+| RewardManager 对每个 term 要求输出精确 shape 为 [num_envs] | mjlab/managers/manager_base.py 的 _check_term_shape 与 managers/reward_manager.py | 所有逐足、逐接触、逐关节量必须在 term 内归约 |
+| Manager 在 policy action 后执行 decimation 个 physics step，再计算 termination 和 reward | mjlab/envs/manager_based_rl_env.py:386-506 | reward 看到的是一个 policy step 的末端状态；不要在 term 内重复乘 dt 或推进状态 |
+| scale_rewards_by_dt 默认 True，当前源码却写成 False | ManagerBasedRlEnvCfg 与 him_go2_env.py:_build_mjlab_managercfg | 继续使用 legacy raw scale 时必须改为 True；这是迁移契约，不是本节已完成的 Python 改动 |
+| ContactSensor 的 air time 每个 physics substep 更新，force_history 的 index 0 是最近 substep | mjlab/sensor/contact_sensor.py | feet_air_time 不能自己按 policy step 猜时间；collision 的 history 聚合必须明确物理含义 |
+
+本节采用下面这组最小契约。
+
+| 项目 | 契约 |
+|---|---|
+| 调用签名 | 每个 active term 是 @staticmethod，逻辑签名为 func(env, **resolved_params) |
+| 环境批次 | env.num_envs = N；所有输出为与 env.device 相同设备上的 float tensor，shape 严格为 [N] |
+| command | command_name=twist，返回 [N,3]，顺序为 vx、vy、wz；不从 actor observation 反切 command |
+| entity | SceneEntityCfg 在 RewardManager 初始化阶段 resolve；reward 内使用 name、joint_ids、site_ids、actuator_ids，不自行按 XML 顺序猜索引 |
+| 动作时序 | action_manager.action、prev_action、prev_prev_action 均是 policy action；action rate 用一阶差分，smoothness 用二阶差分 |
+| 接触时序 | feet_ground_contact 开启 track_air_time=True；nonfoot_ground_touch 的 history_length=4 对应 decimation=4 的 physics history |
+| dt | RewardTermCfg.weight 使用配置中的 raw scale；Manager 统一执行 value * weight * step_dt；reward 方法不得手工乘 step_dt |
+| 状态副作用 | reward 方法只读 env/scene/manager；不在静态 term 内维护 feet_air_time、last_contact 等持久状态 |
+
+### 12.2 推荐类内实现：可直接插入 HimGo2Env 的 reward 代码
+
+下面代码块的缩进假定内容放在 class HimGo2Env(ManagerBasedRlEnv) 内。它复用当前
+文件已有的 torch、Entity、ManagerBasedRlEnv、RewardTermCfg、SceneEntityCfg 和
+ContactSensor 导入。代码以当前 builder 的无参签名 _build_rewards(self) 为准，
+因为当前源码在 self.robot_cfg 中保存了 legacy 配置。
+
+第4节是唯一规范完整实现；第12节不再复制代码。所有自定义 reward 必须在 HimGo2Env 类内使用 @staticmethod，并由 HimGo2Env._reward_* 注册。第12节其余表格和风险说明继续有效。
+
+orientation 方法按 asset_cfg.name 取根实体，因而不会依赖
+_DEFAULT_ASSET_CFG = SceneEntityCfg("robot")。当前 HimGo2RoughCfg.asset.name
+是 go2；如果环境资产名变更，SceneEntityCfg 会随 builder 参数化，不应在 reward
+函数中硬编码业务名称。最终 Python 文件只保留这一版 orientation 定义。
+
+上面的代码是 callable 与注册契约，不是对当前源码的自动补丁。当前源码的
+_build_rewards、_reward_scale、_add_reward 需要作为一个一致的组替换；不能只
+复制静态方法而继续使用旧的空 builder。若项目后来把 builder 改成接收显式 cfg，
+只需把 cfg = self.robot_cfg 换成该接口的 cfg，不要把 reward 函数移回模块级。
+
+注意：本文第 4 节的完整替换候选曾使用
+_add_reward(terms, cfg, name, func, params) 的文档级 helper 签名，而当前工作树
+源码的 _add_reward 是 _add_reward(terms, name, func, params)。这两个候选不能
+交叉复制；本节代码选择当前源码的无 cfg helper 签名，并把 cfg 只从
+self.robot_cfg 读取。
+
+### 12.3 当前 rewards 配置逐项注册表
+
+下表以当前 him_go2_config.py 的 scale 为准。active 表示 scale 非零且本节
+builder 会注册；zero 表示函数可以保留在类内，但当前配置不进入 RewardManager。
+
+| 配置项 | scale | 类内 callable | mjlab 1.6 数据与归约 | 状态 |
+|---|---:|---|---|---|
+| tracking_lin_vel | 1.0 | _reward_tracking_lin_vel | root_link_lin_vel_b 的 xy 与 twist xy，exp(-平方误差 / tracking_sigma) | active |
+| tracking_ang_vel | 0.5 | _reward_tracking_ang_vel | root_link_ang_vel_b 的 yaw 与 twist wz，exp(-平方误差 / tracking_sigma) | active |
+| lin_vel_z | -1.5 | _reward_lin_vel_z | root_link_lin_vel_b[:,2] 平方 | active |
+| ang_vel_xy | -0.05 | _reward_ang_vel_xy | root_link_ang_vel_b 的 xy 平方和 | active |
+| orientation | -0.2 | _reward_orientation | projected_gravity_b 的 xy 平方和 | active |
+| dof_acc | -2.5e-7 | _reward_dof_acc | joint_acc 选定 12 个 joint 后平方和 | active |
+| joint_power | -2e-5 | _reward_joint_power | qfrc_actuator 与 joint_vel 的绝对乘积和 | active |
+| base_height | -1.0 | _reward_base_height | height_scan 有效 hit 的 root z - hit z 均值与 target 的平方 | active |
+| foot_clearance | -0.01 | _reward_foot_clearance | 四个 site 的 world z 绝对误差乘 world xy 速度，再按 xy 范数 + abs(wz) gate 归约 | active |
+| action_rate | -0.01 | _reward_action_rate | action - prev_action 的平方和 | active |
+| smoothness | -0.01 | _reward_smoothness | action - 2 prev_action + prev_prev_action 的平方和 | active |
+| feet_air_time | 0.1 | _reward_feet_air_time | ContactSensor current air/contact time；当前 candidate/Unitree 语义：进入 two-contact mode（恰好两足接触）后取四足 mode time 最小值 | active；runtime `NOT_RUN` |
+| collision | -0.5 | _reward_collision | `force_history` 的 H=4 是 physics-history 槽计数而非 contact total；无 history 时回退到 found 计数 | active |
+| stand_still | -1.0 | _reward_stand_still | joint position 相对 default 的平方和，仅 xy 范数 + abs(wz) 不大于 0.1 时生效 | active |
+| torques | -0.0 | _reward_torques | actuator_force 选定 actuator 后平方和 | zero |
+| dof_vel | -0.0 | _reward_dof_vel | joint_vel 平方和 | zero |
+| dof_pos_limits | -10.0 | _reward_dof_pos_limits | soft_joint_pos_limits 外的线性 violation 和 | active |
+| dof_vel_limits | -0.0 | _reward_dof_vel_limits | 显式传入标量或每关节 `velocity_limits`，按 `soft_limit` 计算线性超限并逐关节截断到 1 后求和；无来源时不注册 | zero/contract-only |
+| torque_limits | -1.0 | _reward_torque_limits | actuator_force 相对各 IdealPdActuator.force_limit 的归一化超限平方和 | active，需重点验证 |
+| hip_pos | -1.0 | _reward_hip_pos | 四个 hip joint 相对 default 的平方和；本候选不加 legacy 的精确零侧向命令 gate | active |
+| feet_stumble | -0.0 | _reward_feet_stumble | feet current force 的水平力大于 5 倍垂直力时按环境给事件 bit | zero |
+| termination | -0.0 | _reward_termination | termination_manager.terminated，失败终止为 1，timeout 不计入 | zero，默认不注册 |
+
+这里的 active 数量是 17。函数定义数量多于 active 数量是有意的：这样把
+配置中可能重新打开的普通项也限制在 HimGo2Env 内，但没有把当前 zero scale
+误报成运行时 active。dof_vel_limits 是例外：若没有明确的每关节速度上限来源，
+不能仅因为配置里存在 soft_dof_vel_limit=1.0 就注册它。
+
+### 12.4 四个参考项目的语义对齐
+
+四个参考项目不能被当作同一个实现。下面先给出本候选的选择，再标出偏差和
+迁移时必须保留的风险。
+
+| 参考项目 | 事实锚点 | 本候选采用/不采用的语义 |
+|---|---|---|
+| AMP_mjlab | /home/kk/github/AMP_mjlab 的 mjlab 1.2.0 velocity 配置与 mdp/rewards.py | 采用 manager RewardTermCfg 组织和 projected-gravity、动作项的结构；不把 1.2.0 API 当成 1.6.0 证据，也不引入 AMP 专用 observation、runner 或额外 termination 权重 |
+| unitree_rl_mjlab | /home/kk/github/unitree_rl_mjlab/src/tasks/velocity/mdp/rewards.py | 采用其 tracking 的 exp 形式、feet_air_time 的 current air/contact time + two-contact mode（恰好两足接触）+ min 以及 site world position/velocity 的 clearance 形式；其 1.2.0/任务本地实现只作语义参考 |
+| HIMLoco | /home/kk/github/HIMLoco/legged_gym/.../go2w_legged_robot.py:51-52 与 rsl_rl/modules/him_estimator.py:76-84 | 保留 legacy 的 current-first history 解释和 actor/critic 分离；不把 legacy self.feet_air_time 的可变 buffer、reset_buf 或六帧观测直接当成 mjlab manager 字段 |
+| 2027_RC_legged_robot | /home/kk/github/2027_RC_legged_robot/legged_gym/envs/base/him_legged_robot.py:1468-1583 | 作为当前 scale 与 legacy 数值基线；tracking 在本候选只跟踪 xy/yaw，z/xy angular 仍为独立 penalty；termination 的 post-clamp 顺序不由 manager 自动复现 |
+
+逐项差异如下。
+
+1. tracking。legacy Go1 只计算 xy 线速度和 yaw 角速度，且使用
+   exp(-error / tracking_sigma)；Unitree mjlab 的线速度 tracking 会把 z
+   误差加进 tracking，角速度 tracking 会把 xy 误差加进 tracking。当前配置
+   同时存在 lin_vel_z 和 ang_vel_xy，因此本候选选择 legacy 的轴拆分，避免
+   同一误差被 tracking 和独立 penalty 双重计算。
+
+2. feet_air_time。本候选选择 Unitree 的 threshold=0.4、two-contact mode（恰好两足接触）和
+   mode time 最小值，因为 mjlab ContactSensor 已提供按 physics substep 更新
+   的 current_air_time/current_contact_time，静态 term 不需要复制状态。legacy
+   HIMLoco/Go1 的等价物是 threshold=0.5、first contact 时读取各足累计 air
+   time，并按足相加；两者不是数值等价。若训练复现目标是旧 checkpoint，应把
+   本 callable 换成基于 ContactSensor.last_air_time 与
+   compute_first_contact(dt=env.step_dt) 的 legacy 分支，不能只改 threshold。
+
+3. collision。Unitree 示例的 force_history 分支通常把
+   [N, primary, history, 3] 先取力范数、跨 primary 做 any，再跨 history
+   求和；本候选保持这一语义。这里 H=4 表示 physics-history 槽计数而非
+   contact total，不是四个独立接触；当前 Go2Asset helper 的 nonfoot sensor 实际为
+   reduce=maxforce、num_slots=1、history_length=decimation；若改成 reduce=none，
+   found 的 primary/slot 数量和 force_history 的 P 轴会变，reward 的绝对量也会
+   变。legacy 当前接触判断用当前帧 force > 0.1，Unitree 常用 10，而当前配置
+   max_contact_force=100；阈值必须作为明确迁移选择，不能宣称三者相同。
+
+4. stand_still。Unitree/本候选是 default pose 的平方和并按 command gate；
+   legacy 是 L1 joint error 且主要按线速度命令 gate。当前类内方案保持前文
+   candidate 的 squared default-pose 选择，说明这是一项语义变更，不是机械的
+   函数搬家。
+
+5. hip_pos。legacy 是四个 hip 相对零角度、且只在侧向命令等于零时惩罚；
+   本候选沿用前文 candidate 的相对 default pose 平方和，不加精确浮点等于零
+   的 gate。若要复现 legacy，须显式增加目标为零和 command gate。
+
+6. foot_clearance。Unitree/candidate 使用 site_pos_w 和 site_lin_vel_w 的
+   world 高度、world xy 速度、绝对高度误差；legacy 使用相对 root 的 body-frame
+   高度、平方误差，且没有同样的 gate。当前 clearance_height_target=-0.2
+   不是 world foot target，builder 用 abs 后得到 0.2 是候选转换，必须在真实
+   XML/地形上复核。
+
+7. dof_acc 与 torque_limits。Unitree mjlab 可直接读 joint_acc；legacy 是
+   (last_dof_vel-dof_vel)/legacy_dt。mjlab 的 joint_acc 来自 physics derived
+   data，且 reward 计算点存在最后一个 mj_step 的一 substep freshness 约束。
+   torque_limits 不能把 actuator_force 当作 legacy 未限幅 torque；mjlab
+   IdealPdActuator 的 force_limit 会在 actuator 输出路径中做 clip，因此
+   soft_torque_limit=1.0 时该 penalty 可能长期为零。
+
+### 12.5 shape、时序与 contact history 风险清单
+
+#### shape
+
+- RewardManager 的硬检查是 [N]，不是 [N,1]、[N,4] 或 [N,4,3]。四个 feet
+  的 contact/time、四元 site 高度、选定 joint/actuator 必须在 callable 内完成
+  sum、min、any 或 count。
+- root_link_lin_vel_b、root_link_ang_vel_b、projected_gravity_b 是 [N,3]；
+  joint_pos、joint_vel、joint_acc 是 [N,J]；action 及其两级历史是 [N,A]，
+  当前 A 应为 12。每个 term 的最终输出必须 batch 维仍为 N。
+- ContactSensor 的 found 不是固定为 [N,4]：它可能是 [N,P] 或
+  [N,P*num_slots]；force_history 是 [N,P_or_slots,H,3]。本节 collision
+  明确把 H=4 的 physics-history 槽维 count 掉，不把它当作 contact total；
+  fallback 明确把 found 的第二维 count 掉，但这两个结果的单位不同。
+- ContactSensor 的 current_air_time/current_contact_time 是 [N,P]，P 必须在
+  runtime 解析为四个 primary foot。不能仅根据 sensor 名称假定 FL、RL、FR、
+  RR 顺序；应检查 sensor.primary_names 与 SceneEntityCfg.site_names 的解析表。
+- SceneEntityCfg 在 manager 初始化时被 resolve；term 内不能把 joint_ids
+  当作全局 MuJoCo joint id 再次映射，也不能把 actuator_ids 传给 joint_pos。
+
+#### 时序
+
+- Manager 每个 policy step 先 process_action 一次，再 apply_action 和
+  sim.step 四次；action_manager.action 是当前 policy action，prev_action 和
+  prev_prev_action 是 policy-level history。action rate/smoothness 不应在四个
+  physics substep 中重复累加。
+- Reward 在 termination.compute() 之后调用。由此 _reward_termination 读取的
+  terminated 是当前 step 的失败终止 bit；time_out 属于 time_outs/truncated，
+  不是 terminated。
+- mjlab 文档明确提醒：reward/termination 读取的 derived data 可能比最后一次
+  mj_step 少一个 physics forward 的新鲜度；不要把 joint_acc 与 legacy 的
+  velocity finite difference 宣称为同一时刻同一量。
+- RewardTermCfg.weight 是 raw scale 时，唯一的 dt 路径是
+  RewardManager 的 value * weight * env.step_dt。当前 decimation=4、sim.dt=0.005，
+  step_dt=0.02；手工把 scale 先乘 0.02 或把 scale_rewards_by_dt 设 False 都会
+  破坏 legacy 数值标定。
+
+#### contact history
+
+- force_history 只有在 ContactSensorCfg.fields 包含 force 且 history_length>0
+  时才有分配。只注册 _reward_collision 而没有相应 sensor field/history，
+  不是“退化为同一语义”，而是会进入 found fallback 或直接失败。
+- collision 的 H=4（history_length=4）表示四个 physics-history 槽、对应四个
+  physics substep，不是 contact total，也不是四个 policy observation frame。
+  index 0 是最近 substep，若要 count 应明确是否对 history 求和、取 any，不能
+  把 index 0 当作当前 policy frame 后又乘 decimation。
+- track_air_time=True 的 sensor 在 Sensor.reset(env_ids) 时按 env 部分重置。
+  因而静态 reward 不应写 self.feet_air_time 累加器；若实现 legacy first-contact
+  stateful 版本，必须使用 manager 可实例化的 class term 并验证 partial reset。
+- 当前 go2_asset.py 的足端 sensor 也设置了 history_length=decimation，但
+  _reward_feet_air_time 只读取 air/contact time；不要因此误把足端 history
+  当作 collision history。
+- found 是接触匹配数量/事件，不是力。reduce=maxforce/netforce/none 会改变
+  found 或 force 的物理解释；force_threshold=100、10、0.1 之间不能只靠名称
+  推断等价关系。
+
+### 12.6 termination reward 与 only_positive_rewards 的边界
+
+_reward_termination 只返回 termination_manager.terminated，符合 mjlab 1.6 的
+failure-only 语义；timeout term 由 TerminationTermCfg(time_out=True) 进入
+time_outs，不应再由 reward 读取 reset_buf 复制一份。
+
+当前 scale 是 termination=-0.0，因此推荐默认不注册它。若后来把它改成非零，
+RewardManager 会像其他项一样把它加入总和；而 legacy HIMLoco 的顺序是先对普通
+reward 总和做 only_positive_rewards clamp，再把 termination reward 追加到 clamp
+之后。mjlab 不会自动读取 legacy 的 only_positive_rewards，也不会自动执行这个
+post-clamp injection。
+
+因此存在两个必须显式选择的契约：
+
+| 选择 | 行为 | 风险 |
+|---|---|---|
+| manager-native | termination 进入 RewardManager 总和，若外层统一 clamp 则和普通项一起 clamp | 不复现 legacy 的“clamp 后再扣 terminal penalty” |
+| legacy-compatible | 在环境 step 的 reward 汇总边界保存普通总和、先 clamp，再追加 terminated penalty | 需要改环境生命周期/step 汇总代码，超出只搬 reward callable 的范围，必须另开审查 |
+
+本节只提供 manager-native 的 callable，不把任一选择伪装成已运行。特别是
+在 only_positive_rewards=True 时，不能因为看到 termination 方法存在就声称
+legacy terminal penalty 已生效。
+
+### 12.7 注册后验收契约
+
+以下是落地 Python 修改后的最小检查清单；当前文档追加没有执行这些检查。
+
+1. 静态检查：所有 RewardTermCfg.func 的 __qualname__ 应以
+   HimGo2Env. 开头；active term 集合应为当前 scale 的 17 项，不能出现
+   同名的模块级函数；所有 callable 都应能以 env 为第一个实参调用。
+2. manager shape gate：在至少 4 个 env 的真实 manager 上执行 reset/step，
+   对每个 active term 单独读取 get_active_iterable_terms，确认 value 是
+   [N]、finite，且没有 [N,1]、per-foot 或 history 未归约结果。
+3. dt gate：记录 scale_rewards_by_dt、env.step_dt 和 manager 输出，证明每项只
+   经一次 0.02 缩放；用一个固定 synthetic state 对比 raw term、weight 后值、
+   manager reward。
+4. action timing gate：连续三次不同 action，验证 rate 使用一阶差分，
+   smoothness 使用二阶差分；验证 decimation=4 不会把同一 action 项累计四次。
+5. contact gate：构造单足、双足、四足接触和 partial reset，确认
+   current_air_time/current_contact_time 在 physics substep 递增/重置，确认
+   collision history 的输出范围为 0 到 H，并记录 reduce、P、H、threshold。
+6. torque gate：在 actuator clip 前后分别记录原始 PD effort（若可得）和
+   asset.data.actuator_force；若 force 已被限幅，则 soft_torque_limit=1.0 的
+   active reward 应明确标记为 dead/无效，而不是把全零输出当作验证通过。
+7. termination gate：分别注入非 timeout 失败和 timeout，确认
+   terminated、time_outs、_reward_termination 三者只在失败 case 对应；再单独
+   验证 only_positive_rewards 的 clamp 顺序。
+8. full runtime gate：当前源码仍有 recorders =、metrics 空值、builder 签名/
+   调用不一致等已知阻断；在这些 Python 问题修复并实际运行前，本文状态保持
+   NOT_RUN，不得输出 [ALL_TESTS_PASSED]。
+
+本节的结论是：在不改变全局架构的前提下，“全部 reward callable 放进
+HimGo2Env”可以通过静态方法 + 显式 SceneEntityCfg/ContactSensor 参数实现，
+且能满足 mjlab 1.6 的 manager 调用协议；但它只解决 callable 的归属与 shape
+契约，不自动解决当前 Python 的 import/manager 构造、only-positive 顺序、
+actuator 未限幅 torque、四足 primary 映射或四个参考项目之间的数值语义差异。

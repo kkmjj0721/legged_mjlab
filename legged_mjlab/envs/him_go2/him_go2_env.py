@@ -50,7 +50,11 @@ class HimGo2Env(ManagerBasedRlEnv):
         self.asset = Go2Asset(self.robot_cfg)
         self.play = bool(play)
 
+        # 组装并生成 mjlab 规范的 ManagerBasedRlEnvCfg
         self.managercfg = self._build_mjlab_managercfg(play = self.play, debug_vis = debug_vis)
+
+        # 记录是否只保留正向奖励（截断负奖励）
+        self.only_positive_rewards = self.robot_cfg.rewards.only_positive_rewards
 
         # 完成底层 MuJoCo 仿真器与各 Manager 的实例化
         super().__init__(
@@ -93,9 +97,8 @@ class HimGo2Env(ManagerBasedRlEnv):
             terminations = self._build_terminations(),                      # 挂载终止条件管理器配置
             commands = self._build_commands(),
             curriculum = self._build_curriculum(),
-            recorders = ,
             scale_rewards_by_dt = False,
-            metrics =
+            metrics = , 
         )
 
     def _build_scene(self, asset, entity_name, play, debug_vis = False):
@@ -103,8 +106,8 @@ class HimGo2Env(ManagerBasedRlEnv):
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/scene.html
         """
         return SceneCfg(
-            num_envs = self.robot_cfg.env.num_envs,                                           # 环境数
-            env_spacing = self.robot_cfg.env.env_spacing,                                     # 并行环境间的网格间距
+            num_envs = self.robot_cfg.env.num_envs,                                     # 环境数
+            env_spacing = self.robot_cfg.env.env_spacing,                               # 并行环境间的网格间距
             terrain = self._build_terrain(),                                            # 挂载地形实体
             entities = {                                                                # 挂载机器人的 MJCF 实体配置
                 entity_name: asset.entity.get_robot_cfg()
@@ -112,6 +115,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             sensors = tuple(                                                            # 构建并挂载传感器元组
                 self._build_sensors(entity_name, debug_vis = debug_vis)
             ),
+            extent = self.robot_cfg.env.extent
         )
 
     def _build_sensors(self, entity_name, debug_vis):
@@ -427,6 +431,8 @@ class HimGo2Env(ManagerBasedRlEnv):
             self._get_noise()
         else:
             noise = {}
+
+        
 
         # actor_obs
         actor_terms = {

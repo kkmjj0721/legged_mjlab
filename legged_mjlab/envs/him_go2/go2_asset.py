@@ -274,7 +274,7 @@ class Go2Asset:
                     resolution = self.asset.cfg.terrain.horizontal_scale,  # 采样分辨率
                 ),
                 ray_alignment = "yaw",
-                max_distance = 2.0,              
+                max_distance = 5.0,              
                 debug_vis = bool(debug_vis),     # 是否在 GUI 中绘制扫描射线
                 history_length = self.asset.cfg.control.decimation
             )

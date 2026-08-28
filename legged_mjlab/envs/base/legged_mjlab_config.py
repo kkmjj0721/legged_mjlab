@@ -12,6 +12,7 @@ class LeggedMjlabCfg(BaseConfig):
         num_privileged_obs = None  # if not None, critic uses privileged_obs
         num_actions = 12
         env_spacing = 3.0  # [m] spacing between sub-environments
+        extent = 2.0
         send_timeouts = True  # send time out information to algorithm
         episode_length_s = 20.0  # [s] duration of one episode
         seed = 42
