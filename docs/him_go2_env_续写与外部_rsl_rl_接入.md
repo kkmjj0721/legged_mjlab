@@ -16,7 +16,7 @@ HimGo2Env._build_mjlab_managercfg()
         │ flat ManagerBasedRlEnvCfg
         ▼
 mjlab ManagerBasedRlEnv
-        │ native 观测：actor[45]、critic[239]
+        │ native 观测：actor[45]、critic[235]
         ▼
 HIMRslRlWrapper
         │ actor history[6, 45] -> [270]
@@ -30,18 +30,18 @@ HIMRslRlWrapper
 
 ## 2. 当前文件的明确缺口
 
-当前 `legged_mjlab/legged_mjlab/envs/him_go2/him_go2_env.py` 还不能被 Python 解析。当前真实阻断是 manager-config builder `:67-99` 中的 `recorders = ,`（`:96`）与 `metrics =`（`:98`）语法错误，以及 registry/构造器、builder 调用/定义和 action 字段不匹配；`ViewerConfig` 的 `:83` 是合法构造，不是错误。主要缺口是：
+当前 `legged_mjlab/legged_mjlab/envs/him_go2/him_go2_env.py` 还不能被 Python 解析。当前真实阻断是 manager-config builder `:71-102` 中的 `metrics = ,`（`:101`）语法错误，以及 registry/构造器、builder 调用/定义和 action 字段不匹配；`ViewerConfig` 的 `:87-94` 是合法构造，不是错误。主要缺口是：
 
 | 位置 | 当前问题 | 处理方式 |
 | --- | --- | --- |
-| `_build_mjlab_managercfg` | builder `:67-99` 中 `recorders = ,`（`:96`）与 `metrics =`（`:98`）为语法错误；`ViewerConfig` `:83` 不是错误 | 统一构造 manager 配置 |
+| `_build_mjlab_managercfg` | builder `:71-102` 中 `metrics = ,`（`:101`）为语法错误；`ViewerConfig` `:87-94` 不是错误；`recorders` 可省略并使用 mjlab 1.6.0 默认空 dict | 统一构造 manager 配置 |
 | `MujocoCfg` | 把重力向量传给了 `integrator` | `integrator="implicitfast"`，另传 `gravity=tuple(cfg.sim.gravity)` |
 | `_build_scene` | 依赖空的地形与传感器实现 | 使用合法的 generator、接触传感器和 raycast 传感器 |
 | `_build_terrain` | generator 的 `sub_terrains={}` 无法生成地形，也没有非法类型报错 | 深拷贝 `ROUGH_TERRAINS_CFG` 后显式更新字段 |
 | `_joint_names` | 缺少 `self` | 改成静态方法或普通实例方法 |
 | `_build_actions` | `actuator_name`、`hip_scale_reduction`、`action_clip` 均不符合当前项目接口 | 使用 `actuator_names`、`hip_reduction`，不把旧 clip 字段硬塞给 mjlab |
 | `_reward_scale` | `BaseConfig` 子类不是 Mapping，不能调用 `.get()` | 使用 `getattr(cfg.rewards.scales, name, 0.0)` |
-| `_build_observations` | 空实现 | 严格构造 actor 45 维和 critic 239 维 |
+| `_build_observations` | 空实现 | 严格构造 actor 45 维和当前 scope 的 critic 235 维；若另行选择把足端接触加入 critic，才同步升级到 239 |
 | `_build_events` | 空实现 | 加入 reset、push 和可用的 domain randomization |
 | `_build_commands` | 空实现 | 注册名为 `twist` 的 `UniformVelocityCommandCfg` |
 | `_build_rewards` | `_add_reward` 调用不完整且无返回值；上一版混用了官方 velocity task 函数与项目奖励 | 按 `unitree_rl_mjlab` 的本地 `mdp` 模式注册任务特有 reward，并覆盖所有非零旧 reward |
@@ -74,7 +74,7 @@ HIM-Go2 的 policy canonical joint order 契约为：
 
 旧配置里的 `num_commands = 4` 包含 heading 这个命令配置字段，但 `heading_command=False` 时 heading 不进入 actor 观测；因此 actor 中必须使用 `generated_commands("twist")` 的 3 维输出。
 
-### 3.2 critic 239 维
+### 3.2 critic 235 维
 
 critic 以同样的 45 维 actor 一帧开头，再拼接：
 
@@ -82,17 +82,16 @@ critic 以同样的 45 维 actor 一帧开头，再拼接：
 | --- | ---: |
 | actor terms | 45 |
 | `base_lin_vel` | 3 |
-| `foot_contact` | 4 |
 | `height_scan` | 17 × 11 = 187 |
-| **合计** | **239** |
+| **合计** | **235** |
 
-这里必须区分两套 critic layout。upstream HIMLoco 的 layout 是 `[3 维 base velocity, 45 维 actor]`；依据 `/home/kk/github/HIMLoco/rsl_rl/rsl_rl/modules/him_estimator.py:76-84`，其 `vel` 是 `next_critic_obs[:, 45:48]`，`next_obs` 是 `next_critic_obs[:, 3:48]`。本地 HIM runner 的 layout 则是 `[45 维 actor, 3 维 velocity]`；依据 `rsl_rl/rsl_rl/modules/him_estimator.py:103-109`，本地 `next_obs` 是 `next_critic_obs[..., :45]`，`vel` 是 `next_critic_obs[..., 45:48]`。这是布局差异，不是语义矛盾；两套切片不能互换。wrapper 仍然必须保留完整的 239 维 privileged observation，这样既满足 estimator 的窄输入约定，也保留完整 critic 信息供后续扩展。
+这里必须区分两套 critic layout。upstream HIMLoco 的 layout 是 `[3 维 base velocity, 45 维 actor]`；依据 `/home/kk/github/HIMLoco/rsl_rl/rsl_rl/modules/him_estimator.py:76-84`，其 `vel` 是 `next_critic_obs[:, 45:48]`，`next_obs` 是 `next_critic_obs[:, 3:48]`。本地 HIM runner 的 layout 则是 `[45 维 actor, 3 维 velocity]`；依据 `rsl_rl/rsl_rl/modules/him_estimator.py:103-109`，本地 `next_obs` 是 `next_critic_obs[..., :45]`，`vel` 是 `next_critic_obs[..., 45:48]`。这是布局差异，不是语义矛盾；两套切片不能互换。wrapper 仍然必须保留当前 scope 的完整 235 维 privileged observation，这样既满足 estimator 的窄输入约定，也保留 height scan 信息供后续扩展。`foot_contact` 的 4 维可作为可选 critic 扩展，但只有在同步修改 `num_privileged_obs`、wrapper shape gate、smoke test 和 runner 截断说明后，才允许把 native critic 写成 239。
 
 原生 mjlab observation group 的 `history_length` 必须保持为 `1`。6 帧历史由已有的 `HIMRslRlWrapper` 维护，否则会把 45 维再次历史展开，导致 actor 维度重复。
 
 `actions` 这个 actor 字段固定表示 policy 在上一个 policy step 发出的归一化 action；它不是 actuator delay、PD、effort clip 之后的 executed action。若部署侧要观测或记录 executed/delayed action，必须另设字段，不能复用这 12 维而不改 shape/训练语义。
 
-动作状态必须按四层记录：raw policy action → accepted/clipped action → delayed target → executed torque。第4节候选中 native actor 的 actions 固定是上一帧 raw policy action；环境候选对输入做 [-1,1] clamp，wrapper 负责 finite 检查，部署 adapter 对越界/NaN/Inf 的 reject、输出抑制和 safe path 均没有 runtime 证据。observation delay 按 policy-step 计，custom ScaledIdealPdActuator 的 delay 按 physics-step 计；不能把普通 IdealPd 与 custom actuator 描述成共用 fused buffer。shape 仍固定为 actor 45、native critic 239、wrapper history 270、runner estimator 48；本地 HIMActorCritic 的输入是 45+3+16=64，upstream HIMLoco 的 76 不能直接复用。
+动作状态必须按四层记录：raw policy action → accepted/clipped action → delayed target → executed torque。第4节候选中 native actor 的 actions 固定是上一帧 raw policy action；环境候选对输入做 [-1,1] clamp，wrapper 负责 finite 检查，部署 adapter 对越界/NaN/Inf 的 reject、输出抑制和 safe path 均没有 runtime 证据。observation delay 按 policy-step 计，custom ScaledIdealPdActuator 的 delay 按 physics-step 计；不能把普通 IdealPd 与 custom actuator 描述成共用 fused buffer。shape 仍固定为 actor 45、native critic 235、wrapper history 270、runner estimator 48；本地 HIMActorCritic 的输入是 45+3+16=64，upstream HIMLoco 的 76 不能直接复用。
 
 History 的时序顺序必须与 critic 的 feature 切片分开记录。HIMLoco 在 `/home/kk/github/HIMLoco/legged_gym/legged_gym/envs/go2w/go2w_legged_robot.py:51-52` 先放入 `current_obs`，再接 `obs_buf` 中的旧帧；当前 wrapper 在 `/home/kk/legged_mjlab/legged_mjlab/wrappers/him_wrapper.py:161-180` 先将旧的 `obs_history_buf` 向后移动，再把当前 actor 写入 `obs_history_buf[:, 0]`，flatten 后的 270 维顺序是 `[current frame, older frames...]`。这个 current-first 约定不能由 upstream estimator 的 critic 切片反推。
 
@@ -1502,10 +1501,6 @@ class HimGo2Env(ManagerBasedRlEnv):
                 func=envs_mdp.base_lin_vel,
                 params={"asset_cfg": SceneEntityCfg(entity_name)},
             ),
-            "foot_contact": ObservationTermCfg(
-                func=_foot_contact_observation,
-                params={"sensor_name": "feet_ground_contact"},
-            ),
             "height_scan": ObservationTermCfg(
                 func=envs_mdp.height_scan,
                 params={"sensor_name": "height_scan"},
@@ -1731,12 +1726,12 @@ PYTHONPATH=/home/kk/legged_mjlab python -m legged_mjlab.scripts.train \
 ```python
 (
     history_obs,              # [N, 270]
-    privileged_obs,           # [N, 239]
+    privileged_obs,           # [N, 235]
     rewards,                  # [N]
     dones,                    # [N]
     infos,
     termination_ids,          # [K]
-    termination_privileged,   # [K, 239] 或空 tensor
+    termination_privileged,   # [K, 235] 或空 tensor
 )
 ```
 
@@ -1809,14 +1804,14 @@ env, env_cfg = task_registry.make_env(
 )
 history, privileged = env.reset()
 assert tuple(history.shape) == (4, 270), history.shape
-assert tuple(privileged.shape) == (4, 239), privileged.shape
+assert tuple(privileged.shape) == (4, 235), privileged.shape
 assert env.num_actions == 12
 
 action = torch.zeros((4, 12), device=history.device, dtype=history.dtype)
 step_result = env.step(action)
 next_history, next_privileged = step_result[:2]
 assert tuple(next_history.shape) == (4, 270), next_history.shape
-assert tuple(next_privileged.shape) == (4, 239), next_privileged.shape
+assert tuple(next_privileged.shape) == (4, 235), next_privileged.shape
 print("HIM environment shape contract: OK")
 PY
 ```
@@ -1826,7 +1821,7 @@ PY
 1. `SyntaxError`：目标文件没有完整替换，或把 Markdown fence 一并复制进了 Python 文件。
 2. `TypeError: unexpected keyword actuator_name`：动作配置仍是旧代码，必须使用 `actuator_names`。
 3. `ValueError: no matching names`：先打印 `Go2Asset` 的 `entity.joint_names`、`entity.actuator_names`、`entity.site_names`，核对 XML 名称；当前 XML 的足端 site 是 `FL/FR/RL/RR`，接触 geom 是 `*_foot_collision`。
-4. critic 维度不是 239：检查 actor term 顺序、height scan 网格是否为 17×11，以及是否把 history 放进了原生 mjlab group。
+4. critic 维度不是 235：检查 actor term 顺序、height scan 网格是否为 17×11，以及是否把 history 放进了原生 mjlab group。若你显式启用 4 维 `foot_contact` 扩展，则这里才应改为 239，并同步修改 `num_privileged_obs` 与 wrapper 断言。
 5. wrapper 报 `auto_reset=False`：说明底层环境配置没有暴露 `ManagerBasedRlEnvCfg.auto_reset`，不能继续训练，必须先解决 terminal observation 保留问题。
 6. `rsl_rl` 来源断言失败：运行时加载的是另一个兼容包；先处理包来源，再排查 PPO 参数。
 7. GPU 启动失败但 CPU 通过：先降低 `num_envs`，确认 mujoco-warp、CUDA 和 `mujoco_warp` 版本，再恢复 4096。
@@ -1849,7 +1844,7 @@ PY
 - `manager_cfg` 可以创建，且 `MujocoCfg.integrator`、`gravity` 类型正确；
 - XML 的 actuator、joint、site、geom 全部匹配；
 - actor 为 `[N, 45]`，wrapper history 为 `[N, 270]`；
-- critic 为 `[N, 239]`，其中前 48 维符合 HIM estimator；
+- critic 为 `[N, 235]`，其中前 48 维符合 HIM estimator；
 - 候选环境在 `auto_reset=False` 时直接提供真实 terminal privileged observation，wrapper 只做断言/兼容后供 runner 使用；
 - runtime `rsl_rl.__file__` 指向项目内 `legged_mjlab/rsl_rl/rsl_rl`；
 - 4 环境 CPU、1 iteration smoke test 通过后，才启动 GPU/4096 环境正式训练。
@@ -1862,7 +1857,7 @@ PY
 
 | 层 | 当前事实 | 状态 |
 |---|---|---|
-| Python 入口 | `him_go2_env.py:96` 为 `recorders = ,`；同一构造的 `him_go2_env.py:98` 为 `metrics =` | 阻断 import |
+| Python 入口 | `him_go2_env.py:101` 为 `metrics = ,` | 阻断 import |
 | Asset | `Go2Asset._parse_cfg()` 在 `self.entity` 创建前访问 `self.robot_cfg`/`self.asset` | 阻断构造 |
 | Manager | builder 的参数签名、`MujocoCfg.integrator`、actions 字段、command range 均有错配；当前定义锚点为 scene `:101`、events `:228`、commands `:349`、observations `:410`、terminations `:449`、curriculum `:461`、rewards `:399-408` | 未对齐 |
 | Registry → Env | `task_registry.py:201` 传 `device=...`，而当前 `HimGo2Env.__init__` 仍只接收 `sim_device` | P0 构造阻断 |
@@ -1870,8 +1865,8 @@ PY
 | Effort/clip | 仿真 calf 为 `45 N*m`，部署为 `35.55 N*m`；当前 action clip 字段也不合法 | P0 安全阻断 |
 | Delay/fail-safe | action latency 的 physics/policy 单位未闭环；部署无已验证 watchdog、安全停机和断连处理 | P0 安全阻断 |
 | Actor observation | 目标单帧 45，但当前 builder 只写了两个 term 且没有返回字典 | 未实现 |
-| Native critic | 目标可构造为 `45+3+4+187=239` | 文档目标，源码未实现 |
-| HIM runner critic | `rsl_rl/rsl_rl/runners/him_on_policy_runner.py:165-168` 固定为 `45+3=48`，并在 `:469-492` 截断更宽 critic | 已实现为 48，和 native 239 是两层契约 |
+| Native critic | 当前 scope 目标可构造为 `45+3+187=235`；`45+3+4+187=239` 仅是可选足端接触扩展 | 文档目标，源码未实现 |
+| HIM runner critic | `rsl_rl/rsl_rl/runners/him_on_policy_runner.py:165-168` 固定为 `45+3=48`，并在 `:469-492` 截断更宽 critic | 已实现为 48，和 native 235 是两层契约 |
 | Reward | `him_go2_config.py:174-202` 有非零 scale，但 `_build_rewards()` 返回空字典 | 实际注册 0 项 |
 | Domain randomization | payload、mass/inertia、armature、friction、restitution、motor strength、latency、push 等未形成可验证接线 | 未放行 |
 | Termination/safety | `terminate_after_contacts_on=[]`，当前仅 timeout；初始姿态、落地冲击、危险接触均未验证 | P0 安全阻断 |
@@ -1976,7 +1971,7 @@ PY
 | `env.num_envs`、`env.env_spacing` | 传给 `SceneCfg` | 候选使用，未运行证明 |
 | `env.num_one_step_observations` | wrapper 的 45 维契约与 runner metadata | 候选固定为 45；应与字段交叉断言 |
 | `env.history_length`、`env.num_observations` | 6 帧由 `HIMRslRlWrapper` 生成 270；不进入 native group history | wrapper 使用；native manager 不读取 legacy 字段 |
-| `env.num_privileged_obs` | native critic 目标宽度 239 | 候选使用；当前源码声明/构造尚未闭环 |
+| `env.num_privileged_obs` | 当前 scope 的 native critic 目标宽度 235；239 仅是 foot-contact 扩展 | 候选使用；当前源码声明/构造尚未闭环 |
 | `env.num_actions` | 12 维期望值 | 仅 metadata/验收；真实值应由 action manager 解析 |
 | `env.send_timeouts` | legacy runner timeout 元数据 | 外部 runner 读取与否需验证；不等价于 mjlab `truncated` |
 | `env.episode_length_s`、`env.seed` | manager episode length 与随机种子 | 候选使用，未运行证明 |
@@ -2083,7 +2078,7 @@ print('group anchors:', sorted(source_groups), 'missing groups:', sorted(missing
 
 | 项目 | 可复用模式 | 不能直接复制到本项目的部分 |
 |---|---|---|
-| `AMP_mjlab` | `ManagerBasedRlEnvCfg` 组装、`register_mjlab_task`、actor/critic/amp 三组、外部 AMP runner/ONNX | 该项目 pin `mjlab==1.2.0`；AMP observation 为 13 bodies×15=195，runner 将相邻两帧拼接为 390 维 discriminator 输入（不是 210 维）；`AMPPPO` 和 patch 后的 history ordering 不是 HIM-Go2 的 45/270/239 契约 |
+| `AMP_mjlab` | `ManagerBasedRlEnvCfg` 组装、`register_mjlab_task`、actor/critic/amp 三组、外部 AMP runner/ONNX | 该项目 pin `mjlab==1.2.0`；AMP observation 为 13 bodies×15=195，runner 将相邻两帧拼接为 390 维 discriminator 输入（不是 210 维）；`AMPPPO` 和 patch 后的 history ordering 不是 HIM-Go2 的 45/270/235 契约，239 只对应可选 foot-contact 扩展 |
 | `unitree_rl_mjlab` | `manager`、`terrain`、`reward` 的组织方式 | 参考仓库 pin `mjlab==1.2.0`、`mujoco-warp==3.5.0`；它不是当前 mjlab v1.6.0 的 API 证据，只能借鉴 manager/terrain/reward 组织；其标准 RSL runner 不是仓库内 `HIMOnPolicyRunner` |
 | `HIMLoco` | 6 帧 history、estimator 19 输出、terminal privileged obs、policy action 与 delayed executed action 的区分 | Isaac Gym tensor、七元 step 约定、硬编码 16 DOF/57 obs、C++ SDK/FSM 不能直接放入 mjlab manager |
 | `legged_gym_go1` | reward 数值基线是实际存在的 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/him_go1/him_go1_config.py`（用户指定的 `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/legged_gym_go1/him_go1_config.py` 当前不存在）；普通 `legged_gym_go1_config.py` 仅作结构参考 | 动态 `_reward_<name>` 注册、奖励 dt 语义、domain_rand 字段命名仍属 legacy；Isaac Gym 的 `step()` 五元组、旧 terrain/safety 字段、Gym buffer 和动态属性不能直接作为 mjlab 1.6 term |
@@ -2102,13 +2097,14 @@ print('group anchors:', sorted(source_groups), 'missing groups:', sorted(missing
 ```text
 native mjlab actor frame       [N, 45]
 HIM wrapper history             [N, 270] = 6 * 45
-native mjlab critic frame      [N, 239] = 45 + base_lin_vel(3) + foot_contact(4) + height(187)
+native mjlab critic frame      [N, 235] = 45 + base_lin_vel(3) + height(187)
+optional critic extension      [N, 239] = 235 + foot_contact(4)
 local HIM runner critic input  [N, 48]  = 45 + base_lin_vel(3)
 HIM estimator output           [N, 19]  = velocity(3) + latent(16)
 HIM actor network input        [N, 76]  = one_step_actor(57 in HIMLoco) + velocity(3) + latent(16)
 ```
 
-最后一行是 HIMLoco 的参考契约，不是当前 Go2 的实际 actor input；当前本地 `HIMActorCritic` 应以 `HIMOnPolicyRunner` 构造参数和 wrapper 的 45/270 为准。保守默认是：**native env/wrapper 保留完整 239，当前 runner 继续显式取前 48 给 estimator/PPO；若要让 critic 网络学习额外 191 维，必须另开一项 runner/storage/网络接口变更，不能只改 `num_privileged_obs`。**
+最后一行是 HIMLoco 的参考契约，不是当前 Go2 的实际 actor input；当前本地 `HIMActorCritic` 应以 `HIMOnPolicyRunner` 构造参数和 wrapper 的 45/270 为准。保守默认是：**native env/wrapper 保留当前配置声明的完整 235，当前 runner 继续显式取前 48 给 estimator/PPO；若要让 critic 网络学习额外 187 维 height scan 或额外 4 维 foot contact，必须另开 runner/storage/网络接口变更，不能只改 `num_privileged_obs`。**
 
 timeout 的正确时序是：候选底层 env 设置 `auto_reset=False` 并直接保证真实 terminal critic → `step()` 返回该 frame → wrapper 只做断言/兼容并在捕获后 reset done env → 将 terminal critic 和 `truncated` mask 交给 runner → 非 timeout failure 不 bootstrap。mjlab 1.6.0 的 partial reset 修复正是为了避免 commands/history/interval timer 跨环境泄漏；不能先 auto-reset 再让 HIM wrapper 猜测，`termination_privileged_obs` 不能退化为 reset 后 observation。
 
@@ -2137,7 +2133,7 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
         num_one_step_observations = 45
         history_length = 6
         num_observations = 270
-        num_privileged_obs = 239
+        num_privileged_obs = 235
         num_actions = 12
         env_spacing = 3.0
         send_timeouts = True
@@ -2710,7 +2706,7 @@ def test_him_go2_cpu_smoke():
     try:
         history, critic = env.reset()
         assert tuple(history.shape) == (4, 270), history.shape
-        assert tuple(critic.shape) == (4, 239), critic.shape
+        assert tuple(critic.shape) == (4, 235), critic.shape
         assert bool(torch.isfinite(history).all())
         assert bool(torch.isfinite(critic).all())
 
@@ -2718,13 +2714,13 @@ def test_him_go2_cpu_smoke():
         assert isinstance(result, tuple) and len(result) == 7
         history, critic, reward, done, infos, done_ids, terminal_critic = result
         assert tuple(history.shape) == (4, 270), history.shape
-        assert tuple(critic.shape) == (4, 239), critic.shape
+        assert tuple(critic.shape) == (4, 235), critic.shape
         assert tuple(reward.shape) == (4,), reward.shape
         assert tuple(done.shape) == (4,), done.shape
         assert done_ids.ndim == 1
         assert isinstance(infos, dict)
         if terminal_critic is not None:
-            assert terminal_critic.shape[-1] == 239
+            assert terminal_critic.shape[-1] == 235
     finally:
         env.close()
 
@@ -2836,7 +2832,7 @@ if __name__ == "__main__":
 - `ContactSensorCfg` 的 `nonfoot_ground_touch` 必须排除四个足端 geom，否则 `collision` 会重复惩罚正常触地；候选代码已改为只列出 `base1/2/3`、四腿 `thigh`、四腿 `calf1/2` 的显式 XML 名称，不再依赖 broad pattern 或可选 `exclude` 字段。
 - 第 4 节完整候选的 `_build_terminations()` 必须保留 `time_out`、`bad_orientation`、`base_contact`，并新增 `nonfoot_contact`，复用 `illegal_contact`，传入 `params={"sensor_name": "nonfoot_ground_touch", "force_threshold": 10.0}`；否则 thigh/calf/base 接触仍然只会进入 `collision` reward，不会在同一 policy step 终止。由于 `nonfoot_ground_touch` 的显式列表也包含 `base1/2/3`，`base_contact` 与 `nonfoot_contact` 可能同时命中；保留这一重叠是安全冗余，验证只断言最终的 `terminated`/`truncated`，不引入未经确认的去重 API。
 - `randomize_restitution` 不应调用未在 v1.6.0 `dr` 表中确认存在的函数；先标为未接入或写有测试的自定义 adapter。
-- `num_privileged_obs=239` 是 native/wrapper 的完整观测宽度；当前 `HIMOnPolicyRunner` storage/network 仍是 48，shape 测试必须同时断言 `(239,48)` 两层，不得只断言 239。
+- `num_privileged_obs=235` 是当前 scope 的 native/wrapper 完整观测宽度；当前 `HIMOnPolicyRunner` storage/network 仍是 48，shape 测试必须同时断言 `(235,48)` 两层，不得只断言 235。若另行启用 `foot_contact` critic 扩展，再把这一组同步升级为 `(239,48)`。
 - 候选 `ManagerBasedRlEnvCfg.auto_reset` 必须显式设置为 `False`。底层先返回/保留真实 terminal frame，`HIMRslRlWrapper` 只能断言 frame/shape/索引并做兼容适配，确认捕获后才 reset done env；wrapper 不可依赖底层先 auto-reset，也不可从 reset 后 observation 猜测 terminal frame。若 `auto_reset=False` 后底层不提供真实 terminal frame，应停止训练。
 - 当前源码 `HimGo2Env.__init__` 的参数名仍与 registry 不匹配；第 4 节候选实现已统一为 `device=None, render_mode=None`，但本轮不改源码，因此落地后仍需重新跑 S1/S2。
 - `go2.xml` 的 runtime actuator 数量为 0，12 个 actuator 由 `IdealPdActuatorCfg` 补建；不要把 `scene_go2.xml` 的 12 个 motor 与同一套 IdealPd actuator 同时使用。
@@ -2862,9 +2858,9 @@ if __name__ == "__main__":
 | 文档环境候选的 `auto_reset`/wrapper 终止帧 | 静态检查确认 `ManagerBasedRlEnvCfg.auto_reset=False`；wrapper 只断言/兼容真实 terminal frame，捕获后才 reset done env | 不等于底层 runtime terminal frame、partial reset 和 timeout bootstrap 已验证；不能依赖先 auto-reset，也不能替代 runtime S14/S17/S18 |
 | 文档 B 的 custom actuator finite guard | 静态检查确认 PD torque、`force_limit`、`motor_strength`、缩放后 torque 和 clamp 后 torque 均有 finite guard；最小测试确认执行顺序为 `PD torque × motor_strength → effort clip` | 只是静态候选保护；不等于每个 physics substep 或 deployment adapter 的 finite reject、输出抑制和安全停机已验证，不能替代 runtime S14/S17/S18 |
 | 文档 E 的 exporter finite/传播边界 | 静态检查确认有限 action 才走 clamp，NaN/Inf 经 `torch.where` 沿 `raw_actions` 原值传播，export-time check 会拒绝非有限样本 | 只是静态候选保护；不等于导出运行时或部署故障注入已验证，不能替代 runtime S14/S17/S18 |
-| 1-env CPU 尝试 | 把 Warp kernel cache 指向 `/tmp` 后进入 CPU kernel 编译；当前环境报告无 CUDA driver | 没有得到 reset/step 的 `[N,45]`/`[N,239]` 运行断言，S4/S5 仍未通过 |
+| 1-env CPU 尝试 | 把 Warp kernel cache 指向 `/tmp` 后进入 CPU kernel 编译；当前环境报告无 CUDA driver | 没有得到 reset/step 的 `[N,45]`/`[N,235]` 运行断言，S4/S5 仍未通过 |
 | 现有 CPU shape smoke test（第 6.3 节） | 只执行 `reset()` 与 `step(zeros)` 的 shape/返回值检查，未注入接触 | 不能证明 `nonfoot_ground_touch` 的 thigh/calf/base 终止路径；后续必须分别注入 thigh、calf、base 接触并断言 `terminated=True`、`truncated=False`，另行触发 timeout 并断言 `terminated=False`、`truncated=True` |
-| 当前工作树 | `git diff --name-only -- '*.py'` 为空；`him_go2_env.py:96` 仍是 `recorders = ,`，同一构造中的 `him_go2_env.py:98` 为 `metrics =` | 不能 import 当前 `him_go2`，也不能触发 `[ALL_TESTS_PASSED]` |
+| 当前工作树 | `git diff --name-only -- '*.py'` 当前包含 `legged_mjlab/envs/him_go2/him_go2_env.py`；`him_go2_env.py:101` 仍是 `metrics = ,` | 不能 import 当前 `him_go2`，也不能触发 `[ALL_TESTS_PASSED]` |
 
 `auto_reset=False`、custom actuator finite guard 和 exporter 的 `torch.where`/export-time finite check 目前都只有静态候选保护证据；它们不能替代 runtime S14、S17、S18，也不能把 clamp 或静态检查解释为硬件 fail-safe。
 
@@ -2886,14 +2882,14 @@ if __name__ == "__main__":
 | 边界 | 固定契约 |
 |---|---|
 | 迁移形态 | `legacy cfg → builder`，字段映射必须可追溯。 |
-| shape | action 12；actor 45；native critic 239；wrapper history 270；runner estimator 48。 |
+| shape | action 12；actor 45；native critic 235；wrapper history 270；runner estimator 48。 |
 | 数值 | `torch.float32`，`device=env.device`，单位为 `m/rad/m/s/N·m`。 |
 | 顺序 | `_joint_names()` 返回 `FL,RL,FR,RR × hip/thigh/calf`，再由四个分腿 action term 固定策略动作顺序；禁止依赖 dict 或 XML 隐式顺序。 |
 | 生命周期 | 明确区分 `reset`、`terminated`、`truncated`，并提供 terminal critic。 |
 
 契约状态：当前源码的 action 顺序仍受按关节类型分组的顺序影响，且 `_build_actions` 仍是旧的 `actuator_name` 接口，尚未满足上述 canonical order 契约；当前状态为 `BLOCKED`。原因同时包括源码契约未满足，以及 S13 action round-trip 当前为 `NOT_RUN`。只有文档候选整体落地并跑完 S13 action round-trip，才允许将该项标记为 `PASS`。本次只修改本文档，不修改源码。
 
-当前 `num_privileged_obs=235` 只是 legacy metadata；candidate `239` 才是 native/wrapper 目标。235 与 239 不可混淆：前者不能证明 native/wrapper shape，后者也不能反写成当前运行已通过。
+当前 `num_privileged_obs=235` 是本轮不变 scope 的 native/wrapper 目标，但当前源码尚未构造出该 shape。candidate `239` 只能作为另行启用 `foot_contact` 的扩展目标；235 与 239 不可混淆，任一数字都不能反写成当前运行已通过。
 
 #### 参考 reward 语义差异
 
@@ -2920,7 +2916,7 @@ if __name__ == "__main__":
 2. **字段映射**：逐项核对 legacy cfg → builder，含 dt、scale、命令、terrain、DR 和 timeout 语义。
 3. **asset**：核对 XML、12 joints/actuators、sensor/site/geom 名称、effort limit，以及由 `_joint_names()` 与四个分腿 action term 固定的策略顺序。
 4. **manager**：构造 scene、action、observation、critic、reward、event、termination manager，并记录字段来源。
-5. **CPU reset/step**：在 CPU 上验证 reset、zero-action step、partial reset 及 45/239/270/48 shape 和 finite。
+5. **CPU reset/step**：在 CPU 上验证 reset、zero-action step、partial reset 及 45/235/270/48 shape 和 finite；若另行启用 foot-contact critic 扩展，再同步验证 239。
 6. **reward/DR**：核对 reward dt 缩放、非零项、接触与 terrain 语义，以及 play 关闭 DR/push/delay。
 7. **action/runner**：验证 12 维动作 round-trip、力矩/clip/顺序、HIM history、48 维 estimator 与 terminal critic。
 8. **play/export/fail-safe**：验证 play、export、NaN/Inf、越界、通信超时、断连和安全停机；未完成不得部署。
@@ -2937,7 +2933,7 @@ P1 安装入口矛盾必须单独记录：根 `setup.py`、`docs/uv使用.md` �
 |---|---|---|---|
 | 安装入口与依赖来源 | `FAIL` | 根 `setup.py` pin 了 `mjlab==1.6.0`、`mujoco-warp==3.11.0`，同时把仓库内 `rsl_rl` 纳入根包；独立 `rsl_rl/setup.py` 也分发同名 `rsl_rl`。`docs/setup.md` 连续安装 `./rsl_rl` 与 `.`。`docs/uv使用.md` 要求根 `pyproject.toml`/`uv sync`，但当前根目录没有 `pyproject.toml`、`uv.lock` 或 `requirements/`，因此安装入口不可复现。 | `setup.py:7-26`；`rsl_rl/setup.py:3-15`；`docs/setup.md:23-32`；`docs/uv使用.md:79-100`；`pyproject.toml`、`uv.lock`、`requirements/`：不存在（无文件行号） |
 | task registry 与环境构造 | `FAIL` | registry 传 `device`，当前 `HimGo2Env` 构造仍接收 `sim_device`，且 `render_mode` 无默认值；按当前调用会在进入有效环境前失败。 | `legged_mjlab/utils/task_registry.py:201-212`；`legged_mjlab/envs/him_go2/him_go2_env.py:41-60` |
-| 当前源码可解析性 | `FAIL` | `ManagerBasedRlEnvCfg` 构造中的 `:96 recorders = ,` 与 `:98 metrics =` 均为语法错误；不能据此宣称 import、reset 或 step 已通过。 | `legged_mjlab/envs/him_go2/him_go2_env.py:67-99`，错误在 `:96 recorders = ,` 与 `:98 metrics =` |
+| 当前源码可解析性 | `FAIL` | `ManagerBasedRlEnvCfg` 构造中的 `:101 metrics = ,` 为语法错误；不能据此宣称 import、reset 或 step 已通过。 | `legged_mjlab/envs/him_go2/him_go2_env.py:71-102`，错误在 `:101 metrics = ,` |
 | play/export 入口 | `FAIL` | `play.py` 为空文件（0 行、0 bytes）；`exporter.py` 仅含 1 个空行（1 byte），当前没有可执行回放或导出入口。 | `legged_mjlab/scripts/play.py:0（空文件）`；`legged_mjlab/utils/exporter.py:1（空行）` |
 | 运行环境与 CPU gate | `BLOCKED` | `nvidia-smi` 当前报告无法与 NVIDIA driver 通信；CPU `reset()`/`step()` 本轮未运行，不能形成 shape/finite 证据。 | `nvidia-smi` 当前输出；审计命令 `nvidia-smi` 当前无法与 NVIDIA driver 通信（命令输出，无文件行号） |
 | 配置声明与实际实现 | `FAIL` | 配置打开了 motor-strength、观测/动作 delay 等随机化，并声明了 termination/reward 项；源码对 payload 随机化仍为 `pass`，资产只创建普通 `IdealPdActuatorCfg`，终止管理器实际只返回 timeout，未落地声明的接触/故障终止。 | `legged_mjlab/envs/him_go2/him_go2_config.py:151-168,174-205`；payload `legged_mjlab/envs/him_go2/him_go2_env.py:283-284`；timeout-only termination `legged_mjlab/envs/him_go2/him_go2_env.py:454-459`；`legged_mjlab/envs/him_go2/go2_asset.py:127-164` |
@@ -2966,12 +2962,12 @@ P1 安装入口矛盾必须单独记录：根 `setup.py`、`docs/uv使用.md` �
 | S1 | `import legged_mjlab.envs` | task 注册成功 | 检查 `recorders`、循环 import、rsl 来源 | BLOCKED |
 | S2 | `Go2Asset(cfg)` + `MjSpec.from_file` | XML、joint、actuator、sensor 名称解析成功 | 对照 `go2.xml:41-159`；禁止猜名 | BLOCKED |
 | S3 | manager config build | `integrator` 是字符串，gravity 是三元组，非空 terrain | 检查所有 builder 参数和 v1.6 dataclass 字段 | BLOCKED |
-| S4 | 4 env CPU `reset()` | actor `[4,45]`、native critic `[4,239]` | 检查 term 顺序/传感器匹配 | BLOCKED |
-| S5 | 4 env CPU `step(zeros)` | history `[4,270]`、critic `[4,239]`、reward `[4]`、terminated/truncated `[4]` | 检查 action dim、finite、dt | BLOCKED |
+| S4 | 4 env CPU `reset()` | actor `[4,45]`、native critic `[4,235]` | 检查 term 顺序/传感器匹配 | BLOCKED |
+| S5 | 4 env CPU `step(zeros)` | history `[4,270]`、critic `[4,235]`、reward `[4]`、terminated/truncated `[4]` | 检查 action dim、finite、dt | BLOCKED |
 | S6 | reward audit | 非零 scale 全部出现在 manager，零 scale 不出现；每项输出 `[4]` | 逐项补 term 或明确禁用 | FAIL |
 | S7 | event audit | startup/reset/interval 事件按 flag 生效，play 关闭 push/DR | 检查 model field 与随机化前后差异 | FAIL |
 | S8 | partial reset | 只 reset done env，其他 env 的 command/history/timer 不变 | 这是 v1.6 partial-reset gate | NOT_RUN |
-| S9 | HIM adapter | wrapper 返回 239，runner 显式消费 48，terminal obs 只替换 done 行 | 任何 silent truncate 都是 blocker | NOT_RUN |
+| S9 | HIM adapter | wrapper 返回 235，runner 显式消费 48，terminal obs 只替换 done 行；239 仅用于显式 foot-contact 扩展 | 任何 silent truncate 都是 blocker | NOT_RUN |
 | S10 | one-iteration HIM PPO | estimator/optimizer/storage 无 shape 或 NaN 错误 | 先确认 `rsl_rl.__file__` 是项目 backend | NOT_RUN |
 | S11 | play | `play=True` 无 curriculum/push/noise，checkpoint 可加载 | 当前 `play.py` 为空，未通过前不能宣称可回放 | FAIL |
 | S12 | export/deploy | 导出输入维度、joint order、action scale/clip/delay 与部署一致 | 当前没有 Go2 HIM 的已验证导出 artifact | FAIL |
@@ -2984,14 +2980,14 @@ P1 安装入口矛盾必须单独记录：根 `setup.py`、`docs/uv使用.md` �
 
 本轮没有执行上述运行验证，也没有触发 `[ALL_TESTS_PASSED]`。因此项目当前仍停在“文档化实现候选 + 静态审计”阶段，不能发布为可训练版本。
 
-验证状态勘误：测试节点曾在临时注释 `recorders` 的工作树上观察到 S1/S2/loader 的局部通过；该临时源码改动已恢复为原始 `recorders = ,`，因此以当前工作树为准，S0/S1/S2 仍应从头执行，import 不能再被描述为已通过。已有 `__pycache__` 变化是审查过程生成物，不是本次目标实现；最终提交前需单独确认其归属。
+验证状态勘误：当前工作树存在未归属的 Python diff，集中在 `him_go2_env.py` 的 `_build_scene()`/sensor manager 调用附近；本轮文档补充不接管这些源码改动。`him_go2_env.py:101` 的 `metrics = ,` 仍在源码中，因此以当前工作树为准，S0/S1/S2 仍应从头执行，import 不能被描述为已通过。已有 `__pycache__` 变化是审查过程生成物，不是本次目标实现；最终提交前需单独确认其归属。
 
 ## 11. 落地顺序、风险与回滚
 
 1. 先手工落地并静态编译 `him_go2_config.py`、`go2_asset.py`、`him_go2_env.py`，只解决 import/Asset/Manager 构造，不启动大规模训练。
 2. 在任何训练前先完成 S13–S16：固定 XML runtime 与 policy/deploy canonical joint order 的逐关节映射，统一 `35.55 N*m` calf 上限，加入 finite/hard clip，验证初始姿态、零动作 settle、危险接触终止。
 3. 关闭全部 domain randomization、push、noise、curriculum 和随机延迟，使用 plane 或单一 rough preset 做 4-env reset/step 和 shape gate。
-4. 打开 actor noise、height scan、critic contact，确认 45/239/270/48 分层契约，再打开 reward；S17 必须证明 play 隔离有效。
+4. 打开 actor noise、height scan，确认 45/235/270/48 分层契约，再打开 reward；若另行启用 critic foot-contact 扩展，则同步确认 239；S17 必须证明 play 隔离有效。
 5. 按一类一类顺序打开 reset randomization：COM → joint friction/damping → friction → PD → mass/armature → push；每次保存参数快照和 episode metric，所有未验证项仍视为未放行。
 6. 最后验证 partial reset、HIM PPO、checkpoint、play、ONNX/部署与 S18 故障注入，不得把训练曲线正常当作接口验证。
 
@@ -3255,7 +3251,7 @@ legacy terminal penalty 已生效。
 7. termination gate：分别注入非 timeout 失败和 timeout，确认
    terminated、time_outs、_reward_termination 三者只在失败 case 对应；再单独
    验证 only_positive_rewards 的 clamp 顺序。
-8. full runtime gate：当前源码仍有 recorders =、metrics 空值、builder 签名/
+8. full runtime gate：当前源码仍有 `metrics = ,`、builder 签名/
    调用不一致等已知阻断；在这些 Python 问题修复并实际运行前，本文状态保持
    NOT_RUN，不得输出 [ALL_TESTS_PASSED]。
 
@@ -3264,3 +3260,95 @@ HimGo2Env”可以通过静态方法 + 显式 SceneEntityCfg/ContactSensor 参�
 且能满足 mjlab 1.6 的 manager 调用协议；但它只解决 callable 的归属与 shape
 契约，不自动解决当前 Python 的 import/manager 构造、only-positive 顺序、
 actuator 未限幅 torque、四足 primary 映射或四个参考项目之间的数值语义差异。
+
+## 13. 2026-08-28 追加审计：MJLab 1.6.0 API 与当前 scope 锁定
+
+本节补充第 4 节候选实现的解释边界：本轮默认不扩展实现范围，保留当前
+`HimGo2RoughCfg.env.num_privileged_obs = 235` 的 scope。`239` 只表示额外把
+4 维 foot-contact 放入 critic 的可选扩展，不能再作为默认目标混用。
+
+### 13.1 当前环境事实
+
+| 项 | 事实 | 影响 |
+|---|---|---|
+| 依赖入口 | 根 `setup.py` pin `mjlab==1.6.0`、`mujoco-warp==3.11.0`，当前 `.venv` 中 `importlib.metadata.version()` 与之吻合 | 以本项目 `.venv/bin/python` 为准；系统 `python` 不存在，系统 `python3` 无 `mjlab` |
+| Matplotlib cache | 导入 mjlab 时默认 `$HOME/.config/matplotlib` 不可写，会退到临时目录 | 后续 smoke/test 命令建议显式设置 `MPLCONFIGDIR=/tmp/mjlab-mpl` |
+| 当前源码解析 | `legged_mjlab/envs/him_go2/him_go2_env.py:101` 仍为 `metrics = ,` | import、task registry、reset/step 全部不能被描述为已通过 |
+| 当前 Python diff | 工作树中已有未归属的 `him_go2_env.py` diff，修改 `_build_scene()` 签名和 sensor manager 调用 | 文档补充只记录它，不合并、不回滚、不把它算成本轮实现 |
+
+### 13.2 MJLab 1.6.0 接口契约
+
+| 模块 | v1.6.0 契约 | 对 HIM-Go2 的要求 |
+|---|---|---|
+| `ManagerBasedRlEnvCfg` | `metrics`/`recorders` 已有默认空 dict；`auto_reset` 默认 `True`；`scale_rewards_by_dt` 默认 `True` | builder 里不要写空右值；若 wrapper 要保留真实 terminal critic，应显式 `auto_reset=False` |
+| manager 加载顺序 | Event → Command → Action → Observation → Termination → Reward → Curriculum → Metrics/Recorder | 需要先定义 scene/sensor/action/obs，再注册依赖它们的 reward/termination |
+| `ObservationTermCfg` | 执行顺序为 func → noise → clip → scale → delay → history；group history 会覆盖 term history | 原生 actor group 保持 45 单帧；6 帧历史只由 `HIMRslRlWrapper` 做 |
+| `JointPositionActionCfg` | 字段是 `actuator_names`，支持 `scale`/`offset`/`clip` dict 和 `preserve_order` | 必须用四个分腿 term 固定策略顺序，不能继续使用旧的 `actuator_name` |
+| `UniformVelocityCommandCfg` | yaw 命令字段是 `ang_vel_z`；`heading` 只有 `heading_command=True` 时才合法 | 当前 heading_command=False 时，actor 只拼 3 维 command，不拼 4 维 |
+| `RewardTermCfg` | callable 形如 `func(env, **params) -> [N]`；`scale_rewards_by_dt=True` 时 manager 自动乘 `env.step_dt` | legacy scale 不应手工再乘 dt；若要复现 clamp 后 terminal penalty，需要另开生命周期修改 |
+| Event/DR | event mode 包括 startup/reset/interval/step；DR 通过 `requires_model_fields` 扩展模型字段 | payload/mass/COM/friction/PD/armature/push 必须明确 mode 与参数快照 |
+| DR 函数表 | v1.6.0 提供 `body_mass`、`pseudo_inertia`、`body_com_offset`、`geom_friction`、`pair_friction`、`joint_friction`、`joint_damping`、`joint_armature`、`pd_gains`、`effort_limits`、`encoder_bias` | 没有确认到内置 `geom_restitution`；`randomize_restitution` 只能标为未接入或写自定义 adapter |
+| ContactSensor | per-contact force/history 与 per-primary air/contact time 是不同张量；partial reset 会按 env 重置 sensor state | reward/termination 必须显式选择 force/found/air_time 的 shape 归约方式 |
+| RayCastSensor | grid ray 数为 frame 数 × pattern 点数；height scan 返回 `[N, num_rays]` | 17×11 height scan 是 187 维，和 actor/history 不混叠 |
+
+官方文档入口：环境配置、observation、action、event、reward、termination、terrain、
+RSL-RL 分别对应 `https://mujocolab.github.io/mjlab/main/source/environment_config.html`、
+`observations.html`、`actions.html`、`events.html`、`rewards.html`、
+`terminations.html`、`terrain.html`、`training/rsl_rl.html`。本节以本项目已安装
+的 `mjlab==1.6.0` 源码为最终判据，文档 URL 只作为章节定位。
+
+### 13.3 当前还没用上的配置
+
+| 配置类 | 已声明但未闭环的项 | 推荐接入状态 |
+|---|---|---|
+| reward scales | `tracking_*`、orientation、torque/action rate/smoothness、collision、feet air/clearance/stumble、stand still、joint pos/vel/acc/limit、base height 等非零项 | 第 4 节候选已给出 manager-native callable；当前源码 `_build_rewards()` 仍没有返回 active reward dict |
+| command | `num_commands=4`、heading range、yaw range | 保持 actor 3 维 command；`heading_command=False` 时不传 `heading` range |
+| observation | actor noise、height measurement、privileged velocity/height | actor 45、critic 235；delay 用 ObservationTerm delay，不放进 wrapper history |
+| terrain | rough/static/dynamic 选项、height scan grid | scene terrain 和 raycast sensor 尚未形成可运行闭环 |
+| reset randomization | root pose/velocity、joint pos/vel | 用 reset event；必须和 partial reset gate 一起测 |
+| domain randomization | payload、link mass、COM、joint friction/damping/armature、ground friction、PD gain、effort limit、encoder bias、push | 按 v1.6 DR 函数逐项接入；`restitution`、motor strength、action latency 需要自定义或明确不接入 |
+| actuator/deploy | calf torque 上限、action clip、policy/deploy joint order、latency/fail-safe | 先统一 `FL,RL,FR,RR × hip/thigh/calf` 与 effort limit，再谈导出/部署 |
+| play/export | play.py 为空，exporter.py 为空行 | 目前没有可执行回放和 ONNX/export gate |
+
+### 13.4 参考项目可借鉴边界
+
+| 参考项目 | 可借鉴 | 不可直接迁移 |
+|---|---|---|
+| `/home/kk/github/AMP_mjlab` | `ManagerBasedRlEnvCfg` 组装、task 注册、外部 runner/ONNX 结构、AMP 专用 observation 分组 | pin `mjlab==1.2.0`；AMP discriminator 390 维不是 HIM-Go2 critic |
+| `/home/kk/github/unitree_rl_mjlab` | Go2 manager cfg 分层、Go2 常量表、官方 velocity reward/event/sensor 组织、deploy YAML/CPP 边界 | actor 使用 phase/height-scan 等 Unitree velocity 契约，不是当前 45/270 HIM history |
+| `/home/kk/github/HIMLoco` | HIM estimator 的 velocity/latent/actor 拼接语义和 current-first history 习惯 | upstream critic 切片顺序与本地 runner 不同；不能把 76 维 actor input 当成本地 `HIMActorCritic` 默认 |
+| `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/legged_gym_go1` | legged_gym 风格 reward/domain-rand 命名、课程和迁移文档风格 | 不能绕过 mjlab manager，把 state buffer 和 explicit compute 直接搬进当前实现 |
+
+### 13.5 当前默认代码候选的 shape 锁
+
+第 4 节完整候选中，critic 默认应保持：
+
+```python
+critic_terms = dict(actor_terms)
+critic_terms.update(
+    {
+        "base_lin_vel": ObservationTermCfg(
+            func=envs_mdp.base_lin_vel,
+            params={"asset_cfg": SceneEntityCfg(entity_name)},
+        ),
+        "height_scan": ObservationTermCfg(
+            func=envs_mdp.height_scan,
+            params={"sensor_name": "height_scan"},
+        ),
+    }
+)
+```
+
+只有明确选择扩展 scope，并同步修改 `num_privileged_obs`、wrapper shape gate、
+smoke test、runner/storage 说明之后，才允许加入：
+
+```python
+critic_terms["foot_contact"] = ObservationTermCfg(
+    func=_foot_contact_observation,
+    params={"sensor_name": "feet_ground_contact"},
+)
+```
+
+因此本轮文档的结论是：当前 `him_go2` 仍处于“结构草稿 + 文档化完整候选”阶段；
+缺口的主线不是再换架构，而是把已声明的 manager config、reward、event、sensor、
+action、wrapper 和 deploy shape 按 235 默认契约逐项落地并通过 S0-S18 gate。

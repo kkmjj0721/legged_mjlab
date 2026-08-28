@@ -101,19 +101,20 @@ class HimGo2Env(ManagerBasedRlEnv):
             metrics = , 
         )
 
-    def _build_scene(self, asset, entity_name, play, debug_vis = False):
+    def _build_scene(self, asset, play, debug_vis = False):
         """ 构建场景对象，包含地形和机器人实体
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/scene.html
         """
+        entity_name = self.robot_cfg.asset.name
         return SceneCfg(
             num_envs = self.robot_cfg.env.num_envs,                                     # 环境数
             env_spacing = self.robot_cfg.env.env_spacing,                               # 并行环境间的网格间距
             terrain = self._build_terrain(),                                            # 挂载地形实体
             entities = {                                                                # 挂载机器人的 MJCF 实体配置
-                entity_name: asset.entity.get_robot_cfg()
+                entity_name: self.asset.entity.get_robot_cfg()
             },                                  
             sensors = tuple(                                                            # 构建并挂载传感器元组
-                self._build_sensors(entity_name, debug_vis = debug_vis)
+                self._build_sensors(debug_vis = debug_vis)
             ),
             extent = self.robot_cfg.env.extent
         )
@@ -126,15 +127,15 @@ class HimGo2Env(ManagerBasedRlEnv):
 
         # 足端触地浮空
         if self.robot_cfg.rewards.scales.feet_air_time:
-            sensors.append(self.asset.sensor.get_foot_contact_sensor(entity_name))
+            sensors.append(self.asset.sensor_mgr.get_foot_contact_sensor(entity_name))
 
         # 高程图
         if self.robot_cfg.terrain.measure_heights:
-            sensors.append(self.asset.sensor.get_height_scan_sensor(entity_name, debug_vis))
+            sensors.append(self.asset.sensor_mgr.get_height_scan_sensor(entity_name, debug_vis))
 
         # 
         if self.robot_cfg.rewards.scales.collision and self.asset.penalized_contact_names:
-            sensors.append(self.asset.sensor.get_illegal_contact_sensor(entity_name))
+            sensors.append(self.asset.sensor_mgr.get_illegal_contact_sensor(entity_name))
 
         return sensors
 

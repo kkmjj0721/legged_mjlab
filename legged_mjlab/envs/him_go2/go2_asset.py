@@ -242,6 +242,7 @@ class Go2Asset:
                 reduce = "maxforce",
                 num_slots = 1,
                 history_length = self.asset.cfg.control.decimation,
+                exclude_parent_body = True,
             )
 
         def get_termination_contact_sensor(self, entity_name: str) -> ContactSensorCfg:
