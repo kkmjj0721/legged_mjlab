@@ -9,6 +9,7 @@ from mjlab.envs import mdp as envs_mdp
 from mjlab.tasks.velocity import mdp
 from mjlab.envs.mdp import dr
 import mjlab.terrains as terrain_gen
+from mjlab.utils.noise import UniformNoiseCfg
 from mjlab.utils.lab_api.math import quat_apply_inverse
 from mjlab.viewer import ViewerConfig
 from mjlab.managers import (
@@ -424,16 +425,35 @@ class HimGo2Env(ManagerBasedRlEnv):
             preserve_order = True,
         )
 
-        noise = {}
+        # scale and clip
+        obs_scales = self.robot_cfg.normalization.obs_scales
+        clip_val = self.robot_cfg.normalization.clip_observations
+        clip_obs = (-clip_val, clip_val)
 
-        if play:
-            noise = {}
-        elif self.cfg.noise.add.add_noise:
-            self._get_noise()
+        # delay
+        imu_delay = ()
+        if self.robot_cfg.domain_rand.randomize_obs_imu_latency:
+            imu_delay = tuple(self.robot_cfg.domain_rand.range_obs_imu_latency)
         else:
-            noise = {}
+            imu_delay = 0
 
-        
+        motor_delay = ()
+        if self.robot_cfg.domain_rand.randomize_obs_motor_latency:
+            motor_delay = tuple(self.robot_cfg.domain_rand.range_obs_motor_latency)
+        else:
+            motor_delay = 0
+
+        # noise
+        noise = {}
+        if not play and self.robot_cfg.noise.add_noise:
+            noise_level = self.robot_cfg.noise.noise_level
+            scales = self.robot_cfg.noise.noise_scales
+            noise = {
+                "ang_vel": UniformNoiseCfg(n_min=-scales.ang_vel * noise_level, n_max=scales.ang_vel * noise_level),
+                "gravity": UniformNoiseCfg(n_min=-scales.gravity * noise_level, n_max=scales.gravity * noise_level),
+                "dof_pos": UniformNoiseCfg(n_min=-scales.dof_pos * noise_level, n_max=scales.dof_pos * noise_level),
+                "dof_vel": UniformNoiseCfg(n_min=-scales.dof_vel * noise_level, n_max=scales.dof_vel * noise_level),
+            }
 
         # actor_obs
         actor_terms = {

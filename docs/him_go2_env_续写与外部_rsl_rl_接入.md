@@ -3316,8 +3316,8 @@ RSL-RL 分别对应 `https://mujocolab.github.io/mjlab/main/source/environment_c
 |---|---|---|
 | `/home/kk/github/AMP_mjlab` | `ManagerBasedRlEnvCfg` 组装、task 注册、外部 runner/ONNX 结构、AMP 专用 observation 分组 | pin `mjlab==1.2.0`；AMP discriminator 390 维不是 HIM-Go2 critic |
 | `/home/kk/github/unitree_rl_mjlab` | Go2 manager cfg 分层、Go2 常量表、官方 velocity reward/event/sensor 组织、deploy YAML/CPP 边界 | actor 使用 phase/height-scan 等 Unitree velocity 契约，不是当前 45/270 HIM history |
-| `/home/kk/github/HIMLoco` | HIM estimator 的 velocity/latent/actor 拼接语义和 current-first history 习惯 | upstream critic 切片顺序与本地 runner 不同；不能把 76 维 actor input 当成本地 `HIMActorCritic` 默认 |
-| `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/legged_gym_go1` | legged_gym 风格 reward/domain-rand 命名、课程和迁移文档风格 | 不能绕过 mjlab manager，把 state buffer 和 explicit compute 直接搬进当前实现 |
+| `/home/kk/github/HIMLoco` | HIM estimator 的 velocity/latent/actor 拼接语义和 current-first history 习惯；Go2W actor 顺序为 command、base angular velocity、projected gravity、DOF error、DOF velocity、last action；DR/reward 名称能解释当前配置来源 | Go2W 是 16-action 轮足任务，单帧 actor 57、privileged 262；`terrain_crossing_reward`、wheel action 和 upstream critic 切片顺序不能直接变成当前 12-DOF Go2 的 45/270/235 契约 |
+| `/home/kk/github/2027_RC_legged_robot/legged_gym/envs/legged_gym_go1` | 标准 12-DOF Go1 P 控制、`action_scale=0.25`、`decimation=4`、thigh/calf 惩罚接触、base 接触终止、base-height target 与 entropy 设置可作为 legged_gym 风格迁移参照 | Go1 参考不包含 HIM history/adaptation 结构，也不能绕过 mjlab manager 把 state buffer 和 explicit compute 直接搬进当前实现 |
 
 ### 13.5 当前默认代码候选的 shape 锁
 
