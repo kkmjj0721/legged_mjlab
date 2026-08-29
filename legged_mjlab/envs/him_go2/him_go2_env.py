@@ -5,8 +5,7 @@ from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.scene import SceneCfg 
 from mjlab.entity import Entity
 from mjlab.sim import MujocoCfg, SimulationCfg
-from mjlab.envs import mdp as envs_mdp
-from mjlab.tasks.velocity import mdp
+from mjlab.envs import mdp as mdp
 from mjlab.envs.mdp import dr
 import mjlab.terrains as terrain_gen
 from mjlab.utils.noise import UniformNoiseCfg
@@ -431,17 +430,15 @@ class HimGo2Env(ManagerBasedRlEnv):
         clip_obs = (-clip_val, clip_val)
 
         # delay
-        imu_delay = ()
+        imu_delay_min, imu_delay_max = 0, 0
         if self.robot_cfg.domain_rand.randomize_obs_imu_latency:
-            imu_delay = tuple(self.robot_cfg.domain_rand.range_obs_imu_latency)
-        else:
-            imu_delay = 0
+            imu_delay_min = self.robot_cfg.domain_rand.range_obs_imu_latency[0]
+            imu_delay_max = self.robot_cfg.domain_rand.range_obs_imu_latency[1]
 
-        motor_delay = ()
+        motor_delay_min, motor_delay_max = 0, 0
         if self.robot_cfg.domain_rand.randomize_obs_motor_latency:
-            motor_delay = tuple(self.robot_cfg.domain_rand.range_obs_motor_latency)
-        else:
-            motor_delay = 0
+            motor_delay_min = self.robot_cfg.domain_rand.range_obs_motor_latency[0]
+            motor_delay_max = self.robot_cfg.domain_rand.range_obs_motor_latency[1]
 
         # noise
         noise = {}
@@ -455,22 +452,87 @@ class HimGo2Env(ManagerBasedRlEnv):
                 "dof_vel": UniformNoiseCfg(n_min=-scales.dof_vel * noise_level, n_max=scales.dof_vel * noise_level),
             }
 
-        # actor_obs
+        # actor obs
         actor_terms = {
             # cmd + ang + gra + pos + vel + last_action
             "command": ObservationTermCfg(
-                func = envs_mdp.generated_commands,
+                func = mdp.generated_commands,
                 params = {"command_name": "twist"},
+                clip = clip_obs,
             ),
             "base_ang_vel": ObservationTermCfg(
-                func = envs_mdp.builtin_sensor,
+                func = mdp.builtin_sensor,
                 params = {"sensor_name": f"{entity_name}/imu_ang_vel"},
-                noise = noise.get("ang_vel"),
-                scale = float(self.robot_cfg.normalization.obs_scales.ang_vel),
-
+                noise = noise["ang_vel"],
+                scale = self.robot_cfg.normalization.obs_scales.ang_vel,
+                noise=noise.get("ang_vel"),
+                delay_min_lag = imu_delay_min,
+                delay_max_lag = imu_delay_max,
+                clip = clip_obs,
             ),
+            "projected_gravity": ObservationTermCfg(
+                func = mdp.projected_gravity,
+                noise = noise["gravity"],
+                delay_min_lag = imu_delay_min,
+                delay_max_lag = imu_delay_max,
+                clip = clip_obs,
+            ),
+            "joint_pos": ObservationTermCfg(
+                func = mdp.joint_pos_rel,
+                scale = self.robot_cfg.normalization.obs_scales.dof_pos,
+                noise = noise["dof_pos"],
+                delay_min_lag = motor_delay_min,
+                delay_max_lag = motor_delay_max,
+                clip = clip_obs,
+            ),
+            "joint_vel": ObservationTermCfg(
+                func = mdp.joint_vel_rel,
+                scale = self.robot_cfg.normalization.obs_scales.dof_vel,
+                noise = noise["dof_vel"],
+                delay_min_lag = motor_delay_min,
+                delay_max_lag = motor_delay_max,
+                clip = clip_obs,
+            ),
+            "last_action": ObservationTermCfg(
+                func = mdp.last_action
+            ),
+        }
 
+        # critic obs
+        critic_terms = {
+            **actor_terms,
+            "base_lin_vel": ObservationTermCfg(
+                func = mdp.builtin_sensor,
+                params={"sensor_name": "robot/imu_lin_vel"},
+            ),
+            "height_scan": ObservationTermCfg(
+                func = mdp.height_scan,
+                params={"sensor_name": "terrain_scan"},
+                scale = self.robot_cfg.normalization.obs_scales.height_measurements,
+            ),
+            "foot_height": ObservationTermCfg(
+                func = mdp.foot_height,
+                params = {"asset_cfg": SceneEntityCfg("robot", site_names=())},  
+            ),
+            "foot_air_time": ObservationTermCfg(
+                func = mdp.foot_air_time,
+                params={"sensor_name": "feet_ground_contact"},
+            ),
+        }
 
+         observations = {
+            "actor": ObservationGroupCfg(
+                terms=actor_terms,
+                concatenate_terms=True,
+                enable_corruption=True,
+                history_length=1,
+            ),
+            "critic": ObservationGroupCfg(
+                terms=critic_terms,
+                concatenate_terms=True,
+                enable_corruption=False,
+                history_length=1,
+            ),
         }
 
     def _build_terminations(self):
@@ -480,8 +542,8 @@ class HimGo2Env(ManagerBasedRlEnv):
 
         return {
             "time_out": TerminationTermCfg(
-                func=envs_mdp.time_out,
-                time_out=True,
+                func = mdp.time_out,
+                time_out = True,
             ),
         }
     

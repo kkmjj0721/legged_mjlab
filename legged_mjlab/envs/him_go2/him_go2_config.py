@@ -148,7 +148,6 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
             motor_zero_pos_offset_range = [-0.035, 0.035]
             motor_zero_vel_offset_range = [-0.01, 0.01]
 
-    
             # 电机输出强度
             randomize_motor_strength = True
             motor_strength_range = [0.8, 1.2]
