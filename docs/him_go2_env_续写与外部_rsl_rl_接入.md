@@ -34,7 +34,7 @@ HIMRslRlWrapper
 
 | 位置 | 当前问题 | 处理方式 |
 | --- | --- | --- |
-| `_build_mjlab_managercfg` | builder `:71-102` 中 `metrics = ,`（`:102`）为语法错误；`ViewerConfig` `:87-94` 不是错误；`recorders` 可省略并使用 mjlab 1.6.0 默认空 dict | 统一构造 manager 配置 |
+| `_build_mjlab_managercfg` | builder `:71-102` 中 `metrics = ,`（`:102`）为语法错误；同时没有把 `play`/`debug_vis` 传给需要它们的子 builder；`ViewerConfig` `:87-94` 不是错误；`metrics` / `recorders` 在 mjlab 1.6.0 里都能默认省略为空 dict，但当前源码在这里被语法错误直接截断 | 统一构造 manager 配置 |
 | `MujocoCfg` | 当前只显式传 `timestep`、`iterations`、`ls_iterations`，没有再包一层 `gravity`/`integrator` 覆写 | 如需和 legacy 一致，后续可明确补出；当前不是阻断项 |
 | `_build_scene` | 直接调用 `_build_sensors(debug_vis=debug_vis)`，但 `_build_sensors` 仍需要 `entity_name`；同时 `self.asset.entity.get_robot_cfg()` 被写死，传入的 `asset` 参数几乎没用上 | 把 `entity_name` 传下去，并统一 `asset`/`self.asset` 的使用边界 |
 | `_build_terrain` | generator 分支已写出五类子地形，但比例仍是硬编码 0.2，且没有把 legacy 的 terrain 比例表显式映射成当前字段 | 若要保留 current style，应把比例与 `measure_heights` 的 17×11 网格写成明确契约 |
@@ -45,7 +45,7 @@ HIMRslRlWrapper
 | `_build_events` | 已接入 reset、encoder_bias、pd_gains、base_com、joint_friction、joint_damping；payload 仍是 `pass`，motor strength/push/restitution/latency 尚未接线 | 先把已声明的域随机化全部落到 manager，再谈训练放行 |
 | `_build_commands` | 已注册 `twist`，但仍把标量 `resampling_time` 直接 `tuple()`，并把 `heading` 误当 `ang_vel_z` | 先把 3 维 command 语义修正，再谈 heading 扩展 |
 | `_build_rewards` | 奖励 callable 已在类内定义，但 `_build_rewards()` 仍返回空字典；上一版混用了官方 velocity task 函数与项目奖励 | 按 `unitree_rl_mjlab` 的本地 `mdp` 模式注册任务特有 reward，并覆盖所有非零旧 reward |
-| `_build_terminations` / `_build_curriculum` | 终止条件目前只有 timeout；课程项已有 terrain_levels/commands_levels 骨架 | 终止要补 base/接触，课程要在 play/train 两态下分别验证 |
+| `_build_terminations` / `_build_curriculum` | 终止条件目前只有 timeout；课程项已写出 `terrain_levels` 和 `commands_levels`，但 `commands_levels` 已改成临时 `velocity_stages` 表，仍需 play/train 语义验证 | 终止要补 base/接触，课程要在 play/train 两态下分别验证 |
 | `__init__` | `render_mode` 没有默认值，但现有 `train.py` 不传它 | 将 `render_mode` 默认设为 `None` |
 
 `Go2Asset.sensor` 里还保留了一套早期 API 风格的传感器 helper，例如 `prim_path`、`target_names_expr` 和 `ContactMatch.GEOM_NAME`。它与当前 mjlab 1.6.0 的 scene-level sensor API 不兼容。本方案不调用那套 helper，而是在 `SceneCfg.sensors` 中使用当前 API；后续如果要清理 stale helper，应另开一次代码变更。
@@ -1841,7 +1841,7 @@ PY
 这部分手工代码落地后，`him_go2` 才算达到“可训练”而不是“文件能导入”：
 
 - Python 文件可编译；
-- `manager_cfg` 可以创建，且 `MujocoCfg.integrator`、`gravity` 类型正确；
+- `manager_cfg` 可以创建，且 scene/obs/action/event/termination/curriculum 的 builder 签名全部对齐；
 - XML 的 actuator、joint、site、geom 全部匹配；
 - actor 为 `[N, 45]`，wrapper history 为 `[N, 270]`；
 - critic 为 `[N, 235]`，其中前 48 维符合 HIM estimator；
@@ -1859,12 +1859,12 @@ PY
 |---|---|---|
 | Python 入口 | `him_go2_env.py:102` 为 `metrics = ,` | 阻断 import |
 | Asset | `Go2Asset._parse_cfg()` 在 `self.entity` 创建前访问 `self.robot_cfg`/`self.asset` | 阻断构造 |
-| Manager | builder 的参数签名、actions 字段、command range 以及 `mdp` 导入别名均有错配；当前定义锚点为 scene `:101`、events `:228`、commands `:349`、observations `:410`、terminations `:449`、curriculum `:461`、rewards `:399-408` | 未对齐 |
+| Manager | builder 的参数签名、`play`/`debug_vis` 透传、actions 字段、command range 以及 `mdp` 导入别名均有错配；当前定义锚点为 scene `:105`、events `:234`、commands `:355`、observations `:416`、terminations `:539`、curriculum `:550`、rewards `:405-414` | 未对齐 |
 | Registry → Env | `task_registry.py:201` 传 `device=...`，而当前 `HimGo2Env.__init__` 仍只接收 `sim_device` | P0 构造阻断 |
 | Action order | 当前配置 dict 是“按关节类型分组”的插入顺序；部署是 leg-major `FL, RL, FR, RR`；XML runtime 是 leg-major `FL, FR, RL, RR`；当前源码没有可直接复用的唯一重排表 | 文档候选以 canonical joint order 为契约，通过 `_joint_names()` 与四个分腿 action term 固定 `FL,RL,FR,RR × hip,thigh,calf` 的策略顺序；仍需 P0 round-trip 验证 |
 | Effort/clip | 仿真 calf 为 `45 N*m`，部署为 `35.55 N*m`；当前 action clip 字段也不合法 | P0 安全阻断 |
 | Delay/fail-safe | action latency 的 physics/policy 单位未闭环；部署无已验证 watchdog、安全停机和断连处理 | P0 安全阻断 |
-| Actor observation | 目标单帧 45，但当前 builder 只写了两个 term 且没有返回字典 | 未实现 |
+| Actor observation | 目标单帧 45；当前 builder 已写出六个 actor term 和四个 critic term 骨架，但仍有 `metrics = ,` 阻断、`observations` 未返回、重复 `noise` kwarg 和收尾缩进问题 | 未闭环 |
 | Native critic | 当前 scope 目标可构造为 `45+3+187=235`；`45+3+4+187=239` 仅是可选足端接触扩展 | 文档目标，源码未实现 |
 | HIM runner critic | `rsl_rl/rsl_rl/runners/him_on_policy_runner.py:165-168` 固定为 `45+3=48`，并在 `:469-492` 截断更宽 critic | 已实现为 48，和 native 235 是两层契约 |
 | Reward | `him_go2_config.py:174-202` 有非零 scale，但 `_build_rewards()` 返回空字典 | 实际注册 0 项 |
@@ -2937,7 +2937,7 @@ P1 安装入口矛盾必须单独记录：根 `setup.py`、`docs/uv使用.md` �
 | play/export 入口 | `FAIL` | `play.py` 为空文件（0 行、0 bytes）；`exporter.py` 仅含 1 个空行（1 byte），当前没有可执行回放或导出入口。 | `legged_mjlab/scripts/play.py:0（空文件）`；`legged_mjlab/utils/exporter.py:1（空行）` |
 | 运行环境与 CPU gate | `BLOCKED` | `nvidia-smi` 当前报告无法与 NVIDIA driver 通信；CPU `reset()`/`step()` 本轮未运行，不能形成 shape/finite 证据。 | `nvidia-smi` 当前输出；审计命令 `nvidia-smi` 当前无法与 NVIDIA driver 通信（命令输出，无文件行号） |
 | 配置声明与实际实现 | `FAIL` | 配置打开了 motor-strength、观测/动作 delay 等随机化，并声明了 termination/reward 项；源码对 payload 随机化仍为 `pass`，资产只创建普通 `IdealPdActuatorCfg`，终止管理器实际只返回 timeout，未落地声明的接触/故障终止。 | `legged_mjlab/envs/him_go2/him_go2_config.py:151-168,174-205`；payload `legged_mjlab/envs/him_go2/him_go2_env.py:283-284`；timeout-only termination `legged_mjlab/envs/him_go2/him_go2_env.py:454-459`；`legged_mjlab/envs/him_go2/go2_asset.py:127-164` |
-| play 隔离 | `BLOCKED` | `play` 虽进入环境构造，但 manager builder 调用 `_build_events()`、`_build_observations()`、`_build_curriculum()` 时未传 `play`，与这些函数的签名不一致；不能证明 play 已关闭 DR、push、noise、delay、hold 和 curriculum。 | 调用点 `legged_mjlab/envs/him_go2/him_go2_env.py:69-95`；函数定义 `_build_events:228`、`_build_observations:410`、`_build_curriculum:461` |
+| play 隔离 | `BLOCKED` | `play` 虽进入环境构造，但 manager builder 调用 `_build_events()`、`_build_observations()`、`_build_commands()`、`_build_curriculum()` 时未传 `play` 或 `debug_vis`，与这些函数的签名不一致；不能证明 play 已关闭 DR、push、noise、delay、hold 和 curriculum。 | 调用点 `legged_mjlab/envs/him_go2/him_go2_env.py:72-100`；函数定义 `_build_events:234`、`_build_observations:416`、`_build_commands:355`、`_build_curriculum:550` |
 | wrapper finite check 的安全边界 | `UNSAFE` | wrapper 只在收到动作后以 `FloatingPointError` 拒绝 NaN/Inf；这不是硬件 fail-safe，也没有证明输出抑制、通信监督或安全停机。 | `legged_mjlab/wrappers/him_wrapper.py:210-228,388-397` |
 | 仿真/部署 effort 一致性 | `FAIL` | 仿真配置 calf effort 为 `45 N·m`，部署 YAML 的 calf torque limit 为 `35.55 N·m`，两者不一致。 | `legged_mjlab/envs/him_go2/him_go2_config.py:77-84`；`deploy/deploy_mujoco/him_go2/policy/config.yaml:31-34` |
 | 部署 fail-safe 基础设施 | `UNSAFE` | 当前没有 communication watchdog、sensor-disconnect handling、output suppression、safe-stop 或可审计故障记录；没有部署放行证据。 | `deploy/deploy_mujoco/him_go2/src/library/fsm/fsm.py:1-164`（仅为通用 FSM，未提供上述链路）；`deploy/deploy_mujoco/him_go2/policy/config.yaml:1-54`；全树关键字核验无对应实现 |
@@ -2980,7 +2980,7 @@ P1 安装入口矛盾必须单独记录：根 `setup.py`、`docs/uv使用.md` �
 
 本轮没有执行上述运行验证，也没有触发 `[ALL_TESTS_PASSED]`。因此项目当前仍停在“文档化实现候选 + 静态审计”阶段，不能发布为可训练版本。
 
-验证状态勘误：当前工作树存在未归属的 Python diff，集中在 `him_go2_env.py` 的 `_build_observations()` 骨架、`mdp` 导入别名和 termination 调用附近；本轮文档补充不接管这些源码改动。`him_go2_env.py:102` 的 `metrics = ,` 仍在源码中，因此以当前工作树为准，S0/S1/S2 仍应从头执行，import 不能被描述为已通过。已有 `__pycache__` 变化是审查过程生成物，不是本次目标实现；最终提交前需单独确认其归属。
+验证状态勘误：当前工作树存在未归属的 Python diff，实际只是在源码里额外导入 `mjlab.tasks.velocity.mdp` 覆盖原来的 `mdp` 别名、把 `observations = {` 的缩进拉正、并把 `commands_levels` 改成 `velocity_stages`；本轮文档补充不接管这些源码改动。`him_go2_env.py:102` 的 `metrics = ,` 仍在源码中，因此以当前工作树为准，S0/S1/S2 仍应从头执行，import 不能被描述为已通过。已有 `__pycache__` 变化是审查过程生成物，不是本次目标实现；最终提交前需单独确认其归属。
 
 ## 11. 落地顺序、风险与回滚
 
@@ -3008,7 +3008,7 @@ Python 文件，也没有声称 import、manager 构造或 runtime reward 已通
 | 事实 | 证据 | 对候选实现的约束 |
 |---|---|---|
 | HimGo2RoughCfg.rewards.scales 有 17 个非零项，termination 是 -0.0 | legged_mjlab/envs/him_go2/him_go2_config.py:174-205 | 只把非零项放进 active terms；termination 方法可以存在但默认不注册 |
-| HimGo2Env._build_rewards 当前构造空 terms 并返回 | legged_mjlab/envs/him_go2/him_go2_env.py:399-408 | 本节只设计替换后的 builder，不把文档候选描述成当前已接入 |
+| HimGo2Env._build_rewards 当前构造空 terms 并返回 | legged_mjlab/envs/him_go2/him_go2_env.py:405-414 | 本节只设计替换后的 builder，不把文档候选描述成当前已接入 |
 | 源码已有一组奖励函数，但函数体首参写成 env，未加 self 或 staticmethod | legged_mjlab/envs/him_go2/him_go2_env.py:488-697 | 类内函数必须加 @staticmethod；注册时传 HimGo2Env._reward_xxx，不能传会绑定 self 的实例方法 |
 | 已安装 mjlab 为 1.6.0 | .venv/lib/python3.11/site-packages/mjlab | term callable 最终以 func(env, **params) 调用 |
 | RewardManager 对每个 term 要求输出精确 shape 为 [num_envs] | mjlab/managers/manager_base.py 的 _check_term_shape 与 managers/reward_manager.py | 所有逐足、逐接触、逐关节量必须在 term 内归约 |
@@ -3274,7 +3274,7 @@ actuator 未限幅 torque、四足 primary 映射或四个参考项目之间的�
 | 依赖入口 | 根 `setup.py` pin `mjlab==1.6.0`、`mujoco-warp==3.11.0`，当前 `.venv` 中 `importlib.metadata.version()` 与之吻合 | 以本项目 `.venv/bin/python` 为准；系统 `python` 不存在，系统 `python3` 无 `mjlab` |
 | Matplotlib cache | 导入 mjlab 时默认 `$HOME/.config/matplotlib` 不可写，会退到临时目录 | 后续 smoke/test 命令建议显式设置 `MPLCONFIGDIR=/tmp/mjlab-mpl` |
 | 当前源码解析 | `legged_mjlab/envs/him_go2/him_go2_env.py:102` 仍为 `metrics = ,` | import、task registry、reset/step 全部不能被描述为已通过 |
-| 当前 Python diff | 工作树中已有未归属的 `him_go2_env.py` diff，主要改了 `_build_observations()` 的 actor/critic 骨架、又额外导入 `mjlab.tasks.velocity.mdp` 覆盖了原来的 `mdp` 别名、并修了 termination/curriculum 的缩进 | 文档补充只记录它，不合并、不回滚、不把它算成本轮实现 |
+| 当前 Python diff | 工作树中已有未归属的 `him_go2_env.py` diff，实际只是在源码里额外导入 `mjlab.tasks.velocity.mdp` 覆盖原来的 `mdp` 别名、把 `observations = {` 的缩进拉正、并把 `commands_levels` 改成 `velocity_stages` | 文档补充只记录它，不合并、不回滚、不把它算成本轮实现 |
 
 ### 13.2 MJLab 1.6.0 接口契约
 
@@ -3282,7 +3282,7 @@ actuator 未限幅 torque、四足 primary 映射或四个参考项目之间的�
 |---|---|---|
 | `ManagerBasedRlEnvCfg` | `metrics`/`recorders` 已有默认空 dict；`auto_reset` 默认 `True`；`scale_rewards_by_dt` 默认 `True` | builder 里不要写空右值；若 wrapper 要保留真实 terminal critic，应显式 `auto_reset=False` |
 | manager 加载顺序 | Event → Command → Action → Observation → Termination → Reward → Curriculum → Metrics/Recorder | 需要先定义 scene/sensor/action/obs，再注册依赖它们的 reward/termination |
-| `ObservationTermCfg` | 执行顺序为 func → noise → clip → scale → delay → history；group history 会覆盖 term history | 原生 actor group 保持 45 单帧；6 帧历史只由 `HIMRslRlWrapper` 做 |
+| `ObservationTermCfg` | 执行顺序为 func → noise → clip → scale → delay → history；`ObservationGroupCfg.history_ordering` 还支持 `term/time` 两种布局，但当前 native actor 仍保持 45 单帧，6 帧历史只由 `HIMRslRlWrapper` 做 | 原生 actor group 保持 45 单帧；6 帧历史只由 `HIMRslRlWrapper` 做 |
 | `JointPositionActionCfg` | 字段是 `actuator_names`，支持 `scale`/`offset`/`clip` dict 和 `preserve_order` | 必须用四个分腿 term 固定策略顺序，不能继续使用旧的 `actuator_name` |
 | `UniformVelocityCommandCfg` | yaw 命令字段是 `ang_vel_z`；`heading` 只有 `heading_command=True` 时才合法 | 当前 heading_command=False 时，actor 只拼 3 维 command，不拼 4 维 |
 | `RewardTermCfg` | callable 形如 `func(env, **params) -> [N]`；`scale_rewards_by_dt=True` 时 manager 自动乘 `env.step_dt` | legacy scale 不应手工再乘 dt；若要复现 clamp 后 terminal penalty，需要另开生命周期修改 |
@@ -3359,6 +3359,36 @@ action、wrapper 和 deploy shape 按 235 默认契约逐项落地并通过 S0-S
 |---|---|---|
 | observation | `_build_observations()` 已写出 actor/critic term 骨架；actor 包含 `command/base_ang_vel/projected_gravity/joint_pos/joint_vel/last_action`，critic 追加 `base_lin_vel/height_scan/foot_height/foot_air_time` | 仍被 `metrics = ,` 语法错误阻断，且缺少 `return observations`、重复 `noise` kwarg 和收尾缩进修复 |
 | events | 已接入 `reset_base`、`reset_joints`、`encoder_bias`、`pd_gains`、`base_com`、`joint_friction`、`joint_damping` | payload 仍是 `pass`，push/ground friction/restitution/latency/motor strength 还没接线 |
-| commands | 已注册 `twist` command | `resampling_time_range` 仍把标量 `resampling_time` 强转 tuple，`heading` 还被误写成 `ang_vel_z` |
+| commands | 已注册 `twist` command，但 builder 调用没有传 `debug_vis` | `resampling_time_range` 仍把标量 `resampling_time` 强转 tuple，`heading` 还被误写成 `ang_vel_z` |
 | rewards | reward callable 已在类内定义 | `_build_rewards()` 仍返回空字典，未形成 manager 注册闭环 |
-| terminations/curriculum | 终止只保留 `time_out`；curriculum 已有 `terrain_levels` 和 `commands_levels` 骨架 | 还没有 base/contact 终止，课程项也没有验证过 play/train 两态差异 |
+| terminations/curriculum | 终止只保留 `time_out`；curriculum 已有 `terrain_levels` 和 `commands_levels`，其中 `commands_levels` 使用临时 `velocity_stages` 表 | 还没有 base/contact 终止，课程项也没有验证过 play/train 两态差异 |
+
+## 14. 2026-08-29 官方源码与参考仓库补记
+
+> 这一节只记录本机可见的 MJLab 1.6.0 源码事实和本地参考仓库的写法，不把它们误写成当前 `him_go2` 已完成实现。
+
+### 14.1 官方 MJLab 1.6.0 源码对照点
+
+| 文件 | 当前事实 | 对本文的影响 |
+|---|---|---|
+| `/home/kk/legged_mjlab/.venv/lib/python3.11/site-packages/mjlab/envs/manager_based_rl_env.py` | `metrics`、`recorders` 默认都是空 dict，`auto_reset=True`，`scale_rewards_by_dt=True`；manager 加载顺序是 Event → Command → Action → Observation → Termination → Reward → Curriculum → Metrics → Recorder | 当前源码 `metrics = ,` 不是“小缺项”，而是把官方默认值和加载链路一起挡住 |
+| `/home/kk/legged_mjlab/.venv/lib/python3.11/site-packages/mjlab/managers/observation_manager.py` | `ObservationTermCfg` 管线是 compute → noise → clip → scale → delay → history；`ObservationGroupCfg.history_ordering` 已有 `term/time` 两种布局 | AMP README 里把 history ordering 写成 patch 说明是历史注记，不应继续当成 1.6.0 的前置缺失 |
+| `/home/kk/legged_mjlab/.venv/lib/python3.11/site-packages/mjlab/managers/reward_manager.py` | `scale_by_dt=True` 时 reward 会乘 `env.step_dt`；`get_active_iterable_terms()` 返回未乘 dt 的 step reward rate；NaN/Inf 会被 `nan_to_num` 归零 | 本文关于 reward 缩放、日志和 finite gate 的说法应以 reward manager 本身为准 |
+| `/home/kk/legged_mjlab/.venv/lib/python3.11/site-packages/mjlab/envs/mdp/actions/actions.py` | `BaseActionCfg` 的字段是 `actuator_names`、`scale`、`offset`、`clip`、`preserve_order` | 当前源码里的 `actuator_name` 不是官方字段名，`clip` 也必须按官方 dict 语义处理 |
+| `/home/kk/legged_mjlab/.venv/lib/python3.11/site-packages/mjlab/tasks/velocity/mdp/velocity_command.py` | `heading_command` 默认 False；`ranges.heading` 只在 heading 模式下必填；命令本体还是 3 维 `lin_vel_x/lin_vel_y/ang_vel_z` | 当前 `_build_commands()` 把 `heading` 直塞给 `ang_vel_z` 的写法仍然是错位的 |
+
+### 14.2 本地参考仓库补记
+
+| 仓库 | 当前可借鉴点 | 不能直接迁移的点 |
+|---|---|---|
+| `unitree_rl_mjlab` | `rough/play` 双 factory、`flat` 删除 `height_scan` 和 `terrain_levels`、Go2 的 contact / reward / curriculum override 写法 | `mjlab==1.2.0` 的老字段和旧 terrain 结构不能直接搬到当前 1.6.0 builder |
+| `AMP_mjlab` | `ManagerBasedRlEnvCfg` 的分层组织、task 注册、training/play 说明、`mjlab_patch` 的历史兼容思路 | 其 patch 说明偏旧，不能把 `history_ordering` 继续写成 1.6.0 的缺口 |
+| `HIMLoco` | `num_obs_current=45`、`num_obs_encoder=270`、`actions_scale` 的 leg-major 布局、current-first history 的写法 | 轮足/leg 混合任务的 16 动作和旧 `legged_gym` 接口不能直接变成当前 Go2 的 12 动作 manager contract |
+
+### 14.3 结论
+
+后续续写仍按三条线走：
+
+1. 先以当前 `him_go2_env.py` 的真实错配为主线，不把候选实现写成已完成。
+2. 再以官方 MJLab 1.6.0 源码的默认值和 manager 语义为准，不沿用旧版或 patch-only 假设。
+3. 最后以 `unitree_rl_mjlab`、`AMP_mjlab`、`HIMLoco` 的约束写法作为行文风格参照，继续用表格和代码观察，不改成空泛概述。

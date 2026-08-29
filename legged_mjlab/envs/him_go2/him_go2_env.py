@@ -1,5 +1,5 @@
 import torch
-
+import copy
 
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.scene import SceneCfg 
@@ -419,14 +419,7 @@ class HimGo2Env(ManagerBasedRlEnv):
         """
         entity_name = self.cfg.asset.name
 
-        joint_cfg = SceneEntityCfg(
-            entity_name,
-            joint_names = self.asset.joint_names,
-            preserve_order = True,
-        )
-
-        # scale and clip
-        obs_scales = self.robot_cfg.normalization.obs_scales
+        # clip
         clip_val = self.robot_cfg.normalization.clip_observations
         clip_obs = (-clip_val, clip_val)
 
@@ -464,16 +457,15 @@ class HimGo2Env(ManagerBasedRlEnv):
             "base_ang_vel": ObservationTermCfg(
                 func = mdp.builtin_sensor,
                 params = {"sensor_name": f"{entity_name}/imu_ang_vel"},
-                noise = noise["ang_vel"],
+                noise = noise.get("ang_vel"),
                 scale = self.robot_cfg.normalization.obs_scales.ang_vel,
-                noise=noise.get("ang_vel"),
                 delay_min_lag = imu_delay_min,
                 delay_max_lag = imu_delay_max,
                 clip = clip_obs,
             ),
             "projected_gravity": ObservationTermCfg(
                 func = mdp.projected_gravity,
-                noise = noise["gravity"],
+                noise = noise.get("gravity"),
                 delay_min_lag = imu_delay_min,
                 delay_max_lag = imu_delay_max,
                 clip = clip_obs,
@@ -481,7 +473,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             "joint_pos": ObservationTermCfg(
                 func = mdp.joint_pos_rel,
                 scale = self.robot_cfg.normalization.obs_scales.dof_pos,
-                noise = noise["dof_pos"],
+                noise = noise.get("dof_pos"),
                 delay_min_lag = motor_delay_min,
                 delay_max_lag = motor_delay_max,
                 clip = clip_obs,
@@ -489,7 +481,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             "joint_vel": ObservationTermCfg(
                 func = mdp.joint_vel_rel,
                 scale = self.robot_cfg.normalization.obs_scales.dof_vel,
-                noise = noise["dof_vel"],
+                noise = noise.get("dof_vel"),
                 delay_min_lag = motor_delay_min,
                 delay_max_lag = motor_delay_max,
                 clip = clip_obs,
@@ -500,8 +492,14 @@ class HimGo2Env(ManagerBasedRlEnv):
         }
 
         # critic obs
-        critic_terms = {
-            **actor_terms,
+        critic_terms = {}
+        for name, term in actor_terms.items():
+            critic_term = copy.deepcopy(term)
+            critic_term.delay_min_lag = 0  # 强制归零延迟
+            critic_term.delay_max_lag = 0
+            critic_term.noise = None       # 强制移除噪声
+            critic_terms[name] = critic_term
+        critic_terms.update({
             "base_lin_vel": ObservationTermCfg(
                 func = mdp.builtin_sensor,
                 params={"sensor_name": "robot/imu_lin_vel"},
@@ -511,30 +509,24 @@ class HimGo2Env(ManagerBasedRlEnv):
                 params={"sensor_name": "terrain_scan"},
                 scale = self.robot_cfg.normalization.obs_scales.height_measurements,
             ),
-            "foot_height": ObservationTermCfg(
-                func = mdp.foot_height,
-                params = {"asset_cfg": SceneEntityCfg("robot", site_names=())},  
-            ),
-            "foot_air_time": ObservationTermCfg(
-                func = mdp.foot_air_time,
-                params={"sensor_name": "feet_ground_contact"},
-            ),
-        }
+        })
 
-        observations = {
+        obs = {
             "actor": ObservationGroupCfg(
                 terms=actor_terms,
-                concatenate_terms=True,
-                enable_corruption=True,
+                concatenate_terms = True,
+                enable_corruption = True,
                 history_length=1,
             ),
             "critic": ObservationGroupCfg(
-                terms=critic_terms,
-                concatenate_terms=True,
-                enable_corruption=False,
-                history_length=1,
+                terms = critic_terms,
+                concatenate_terms = True,
+                enable_corruption = False,
+                history_length = 1,
             ),
         }
+
+        return obs
 
     def _build_terminations(self):
         """ 构建回合提前终止条件
@@ -567,8 +559,10 @@ class HimGo2Env(ManagerBasedRlEnv):
                 func = mdp.commands_vel,
                 params = {
                     "command_name": "twist",
-                    "max_lin_vel_x": self.robot_cfg.commands.max_curriculum,
-                    "max_ang_vel_yaw": self.robot_cfg.commands.max_curriculum,
+                    "velocity_stages": [
+                        {"step": 0, "lin_vel_x": (-0.5, 1.0), "lin_vel_y": (-0.5, 0.5), "ang_vel_z": (-1.0, 1.0)},
+                        {"step": 5000 * 24, "lin_vel_x": (-1.0, 2.0), "lin_vel_y": (-1.0, 1.0)},
+                    ],
                 },
             )
 
