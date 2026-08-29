@@ -6,6 +6,7 @@ from mjlab.scene import SceneCfg
 from mjlab.entity import Entity
 from mjlab.sim import MujocoCfg, SimulationCfg
 from mjlab.envs import mdp as mdp
+from mjlab.tasks.velocity import mdp
 from mjlab.envs.mdp import dr
 import mjlab.terrains as terrain_gen
 from mjlab.utils.noise import UniformNoiseCfg
@@ -520,7 +521,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             ),
         }
 
-         observations = {
+        observations = {
             "actor": ObservationGroupCfg(
                 terms=actor_terms,
                 concatenate_terms=True,
@@ -539,7 +540,6 @@ class HimGo2Env(ManagerBasedRlEnv):
         """ 构建回合提前终止条件
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/terminations.html
         """
-
         return {
             "time_out": TerminationTermCfg(
                 func = mdp.time_out,
@@ -558,14 +558,14 @@ class HimGo2Env(ManagerBasedRlEnv):
 
         if self.robot_cfg.terrain.curriculum:
             curriculums["terrain_levels"] = CurriculumTermCfg(
-                func=mdp.terrain_levels_vel,
+                func = mdp.terrain_levels_vel,
                 params={"command_name": "twist"},
             )
 
         if self.robot_cfg.commands.curriculum:
             curriculums["commands_levels"] = CurriculumTermCfg(
                 func = mdp.commands_vel,
-                params={
+                params = {
                     "command_name": "twist",
                     "max_lin_vel_x": self.robot_cfg.commands.max_curriculum,
                     "max_ang_vel_yaw": self.robot_cfg.commands.max_curriculum,
