@@ -103,7 +103,7 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
             randomize_payload_mass = True
             payload_mass_range = [-2.5, 2.5]
     
-            # 连杆质量
+            # 其他link质量
             randomize_link_mass = True
             link_mass_range = [0.9, 1.1]
     

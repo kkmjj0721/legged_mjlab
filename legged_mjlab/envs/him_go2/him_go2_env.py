@@ -256,9 +256,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             ),
             preserve_order=True,
         )
-        
         body_cfg = SceneEntityCfg(entity_name, body_names=("base_link",))
-
         all_body_cfg = SceneEntityCfg(entity_name, body_names=(".*",))
 
         base_pose = {}
@@ -286,9 +284,72 @@ class HimGo2Env(ManagerBasedRlEnv):
         }
 
         # 域随机化部分
+        # --------- 动力学参数随机化 ----------
+        # 基座负载
         if self.robot_cfg.domain_rand.randomize_payload_mass:
+            events["base_mass"] = EventTermCfg(
+                mode = "startup",
+                func = dr.body_mass,
+                params = {
+
+                }
+            )
+
+        # 质心
+        if self.robot_cfg.domain_rand.randomize_com_displacement:
+            events["base_com"] = EventTermCfg(
+                mode = "startup",
+                func = dr.body_com_offset,
+                params = {
+                    "asset_cfg": body_cfg,
+                    "operation": "add",                     # 在默认质心坐标上累加偏移量
+                    "ranges": {
+                        0: tuple(self.robot_cfg.domain_rand.com_displacement_range), # X 轴偏移范围
+                        1: tuple(self.robot_cfg.domain_rand.com_displacement_range), # Y 轴偏移范围
+                        2: tuple(self.robot_cfg.domain_rand.com_displacement_range), # Z 轴偏移范围
+                    },
+                },
+            )
+
+        # 除base外其他link质量：
+        if self.robot_cfg.domain_rand.randomize_link_mass:
             pass
 
+        # 关节摩擦
+        if self.robot_cfg.domain_rand.randomize_joint_friction:
+            events["joint_friction"] = EventTermCfg(
+                mode="startup",
+                func=dr.joint_friction,
+                params={
+                    "asset_cfg": joint_cfg,
+                    "operation": "abs",
+                    "ranges": tuple(self.robot_cfg.domain_rand.joint_friction_range),
+                },
+            )
+
+        # 关节阻尼
+        if self.robot_cfg.domain_rand.randomize_joint_damping:
+            events["joint_damping"] = EventTermCfg(
+                mode="startup",
+                func=dr.joint_damping,
+                params={
+                    "asset_cfg": joint_cfg,
+                    "operation": "abs",
+                    "ranges": tuple(self.robot_cfg.domain_rand.joint_damping_range),
+                },
+            )
+
+        # 关节等效转动惯量
+        if self.robot_cfg.domain_rand.randomize_joint_armature:
+            pass
+
+        # --------- 接触与外力随机化 ----------
+        if self.robot_cfg.domain_rand.push_robots:
+            pass
+
+
+
+        # --------- 控制器与执行器随机化 ----------
         if self.robot_cfg.domain_rand.randomize_motor_zero_offset:
             events["encoder_bias"] = EventTermCfg(
                 mode="startup",
@@ -311,45 +372,7 @@ class HimGo2Env(ManagerBasedRlEnv):
                 }
             )
 
-        if self.robot_cfg.domain_rand.randomize_com_displacement:
-            events["base_com"] = EventTermCfg(
-                mode="startup",
-                func=dr.body_com_offset,
-                params={
-                    "asset_cfg": body_cfg,
-                    "operation": "add",                     # 在默认质心坐标上累加偏移量
-                    "ranges": {
-                        0: tuple(self.robot_cfg.domain_rand.com_displacement_range), # X 轴偏移范围
-                        1: tuple(self.robot_cfg.domain_rand.com_displacement_range), # Y 轴偏移范围
-                        2: tuple(self.robot_cfg.domain_rand.com_displacement_range), # Z 轴偏移范围
-                    },
-                },
-            )
-
-        if self.robot_cfg.domain_rand.randomize_joint_friction:
-            events["joint_friction"] = EventTermCfg(
-                mode="startup",
-                func=dr.joint_friction,
-                params={
-                    "asset_cfg": joint_cfg,
-                    "operation": "abs",
-                    "ranges": tuple(self.robot_cfg.domain_rand.joint_friction_range),
-                },
-            )
-
-        if self.robot_cfg.domain_rand.randomize_joint_damping:
-            events["joint_damping"] = EventTermCfg(
-                mode="startup",
-                func=dr.joint_damping,
-                params={
-                    "asset_cfg": joint_cfg,
-                    "operation": "abs",
-                    "ranges": tuple(self.robot_cfg.domain_rand.joint_damping_range),
-                },
-            )
-
-
-
+        
         return events
 
     def _build_commands(self, debug_vis):
