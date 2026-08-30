@@ -21,14 +21,7 @@ from mjlab.managers import (
     SceneEntityCfg,
     TerminationTermCfg,
 )
-from mjlab.sensor import (
-    ContactMatch,          # 接触匹配规则（用于定义 geom/body 碰撞过滤）
-    ContactSensor,
-    ContactSensorCfg,      # 接触力/碰撞传感器配置
-    GridPatternCfg,        # 射线扫描网格模式配置
-    ObjRef,                # 实体/刚体引用对象
-    RayCastSensorCfg,      # 射线投射传感器（测高）配置
-)
+from mjlab.sensor import ContactSensor
 from mjlab.terrains import TerrainEntityCfg
 from mjlab.terrains.terrain_generator import TerrainGeneratorCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
@@ -74,7 +67,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             scene = self._build_scene(self.asset, play, debug_vis),         # 构建场景（包含实体、传感器、地形）
             observations = self._build_observations(play),                  # 挂载观测管理器配置
             actions = self._build_actions(),                                # 挂载动作管理器配置
-            events = self._build_events(),                                  # 挂载事件管理器配置（reset, domain_rand）
+            events = self._build_events(play),                              # 挂载事件管理器配置（reset, domain_rand）
             seed = self.robot_cfg.env.seed,                                 # 随机种子
             sim = SimulationCfg(                                            # 仿真引擎底层设置
                 nconmax=35,
@@ -85,7 +78,7 @@ class HimGo2Env(ManagerBasedRlEnv):
                     ls_iterations=20,
                 )
             ),                         
-            viewer = ViewerConfig(
+            viewer = ViewerConfig(                                          # 
                 origin_type = ViewerConfig.OriginType.ASSET_BODY,
                 entity_name = entity_name,
                 body_name = "base",
@@ -96,10 +89,10 @@ class HimGo2Env(ManagerBasedRlEnv):
             episode_length_s = self.robot_cfg.env.episode_length_s,         # 单回合最长时间
             rewards = self._build_rewards(),                                # 挂载奖励管理器配置
             terminations = self._build_terminations(),                      # 挂载终止条件管理器配置
-            commands = self._build_commands(),
-            curriculum = self._build_curriculum(),
+            commands = self._build_commands(debug_vis),                     # 构建指令管理器配置
+            curriculum = self._build_curriculum(play),                      # 构建课程训练管理配置
+            # metrics = ,                                                     # 构建任务评估管理器
             scale_rewards_by_dt = False,
-            # metrics = , 
         )
 
     def _build_scene(self, asset, play, debug_vis = False):
@@ -466,14 +459,15 @@ class HimGo2Env(ManagerBasedRlEnv):
             "twist": UniformVelocityCommandCfg(
                 entity_name = self.robot_cfg.asset.name,
                 resampling_time_range = tuple(self.robot_cfg.commands.resampling_time),
-                heading_command = self.robot_cfg.commands.heading_command,
                 rel_standing_envs = 0.05,               # 保持静止环境的比例
                 rel_forward_envs = 0.25,                # 仅前向速度的比例
                 debug_vis = debug_vis,                  # 是否在仿真视口中渲染指令的箭头/可视化标记
+                heading_command = self.robot_cfg.commands.heading_command,
                 ranges = UniformVelocityCommandCfg.Ranges(
                     lin_vel_x = tuple(ranges.lin_vel_x),
                     lin_vel_y = tuple(ranges.lin_vel_y),
-                    ang_vel_z = tuple(ranges.heading),
+                    ang_vel_z = tuple(ranges.ang_vel_yaw),
+                    heading = tuple(ranges.heading),
                 )
             )
         }

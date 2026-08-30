@@ -179,7 +179,6 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
 
     class rewards( LeggedMjlabCfg.rewards ):
         class scales:
-            termination = -0.0
             tracking_lin_vel = 1.0
             tracking_ang_vel = 0.5
             lin_vel_z = -1.5
