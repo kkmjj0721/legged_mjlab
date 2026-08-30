@@ -478,45 +478,6 @@ class HimGo2Env(ManagerBasedRlEnv):
             )
         }
 
-    def _reward_scale(self, name):
-        """ 返回指定奖励项的缩放系数，若不存在则返回 0
-        """
-        return self.robot_cfg.rewards.scales.get(name, 0.0)
-
-    def _add_reward(self, terms, name, func, params=None):
-        """ 通用奖励项注册辅助函数：仅当权重非零时才加入计算图
-        """
-        weight = self._reward_scale(name)
-
-        if weight == 0.0:
-            return
-
-        terms[name] = RewardTermCfg(
-            func = func,
-            weight = weight,
-            params = dict(params or {}),
-        )
-
-    def _entity_term_cfg(self):
-        """ 
-        """
-        return SceneEntityCfg(
-            name=self.cfg.asset.name,
-            joint_names=self._joint_names(),
-            preserve_order=True,
-        )
-
-    def _build_rewards(self):
-        """ 
-            官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/rewards.html
-        """
-
-        robot_cfg = SceneEntityCfg(name = self.robot_cfg.asset.name)
-        joint_cfg = self._entity_term_cfg()
-        terms = {}
-
-        return terms
-
     def _build_observations(self, play: bool):
         """ 构建观测组
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/observations.html
@@ -671,7 +632,46 @@ class HimGo2Env(ManagerBasedRlEnv):
             )
 
         return curriculums
-        
+
+    def _reward_scale(self, name):
+            """ 返回指定奖励项的缩放系数，若不存在则返回 0
+            """
+            return self.robot_cfg.rewards.scales.get(name, 0.0)
+    
+    def _add_reward(self, terms, name, func, params=None):
+        """ 通用奖励项注册辅助函数：仅当权重非零时才加入计算图
+        """
+        weight = self._reward_scale(name)
+
+        if weight == 0.0:
+            return
+
+        terms[name] = RewardTermCfg(
+            func = func,
+            weight = weight,
+            params = dict(params or {}),
+        )
+
+    def _entity_term_cfg(self):
+            """ 
+            """
+            return SceneEntityCfg(
+                name=self.cfg.asset.name,
+                joint_names=self._joint_names(),
+                preserve_order=True,
+            )
+    
+    def _build_rewards(self):
+        """ 
+            官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/rewards.html
+        """
+
+        robot_cfg = SceneEntityCfg(name = self.robot_cfg.asset.name)
+        joint_cfg = self._entity_term_cfg()
+        terms = {}
+
+        return terms
+
 # ----------------- rewards -----------------
 
     def track_linear_velocity(
