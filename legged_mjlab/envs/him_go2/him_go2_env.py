@@ -99,7 +99,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             commands = self._build_commands(),
             curriculum = self._build_curriculum(),
             scale_rewards_by_dt = False,
-            metrics = , 
+            # metrics = , 
         )
 
     def _build_scene(self, asset, play, debug_vis = False):
@@ -256,8 +256,15 @@ class HimGo2Env(ManagerBasedRlEnv):
             ),
             preserve_order=True,
         )
+
         body_cfg = SceneEntityCfg(entity_name, body_names=("base_link",))
-        all_body_cfg = SceneEntityCfg(entity_name, body_names=(".*",))
+
+        non_base_bodies = tuple(b for b in self.asset.body_names if b != "base_link")
+        link_cfg = SceneEntityCfg(
+            entity_name,
+            body_names = non_base_bodies,
+            preserve_order = True,
+        )
 
         base_pose = {}
 
@@ -268,7 +275,13 @@ class HimGo2Env(ManagerBasedRlEnv):
                 func = mdp.reset_root_state_uniform,
                 mode = "reset",                       # 触发时机：每次环境重置时
                 params = {
-
+                    "pose_range": {
+                        "x": (-0.5, 0.5),
+                        "y": (-0.5, 0.5),
+                        "z": (0.0, 0.0),
+                        "yaw": (-3.14, 3.14),
+                    },
+                    "velocity_range": {},
                 }
             ),
             # 重置各关节状态
@@ -283,96 +296,155 @@ class HimGo2Env(ManagerBasedRlEnv):
             ),
         }
 
-        # 域随机化部分
-        # --------- 动力学参数随机化 ----------
-        # 基座负载
-        if self.robot_cfg.domain_rand.randomize_payload_mass:
-            events["base_mass"] = EventTermCfg(
-                mode = "startup",
-                func = dr.body_mass,
-                params = {
+        if not play:
+            # 域随机化部分
+            # --------- 动力学参数随机化 ----------
+            # 基座负载
+            if self.robot_cfg.domain_rand.randomize_payload_mass:
+                events["base_mass"] = EventTermCfg(
+                    mode = "startup",
+                    func = dr.body_mass,
+                    params = {
+                        "asset_cfg": body_cfg,
+                        "operation": "add",
+                        "ranges": tuple(self.robot_cfg.domain_rand.payload_mass_range),
+                    }
+                )
 
-                }
-            )
-
-        # 质心
-        if self.robot_cfg.domain_rand.randomize_com_displacement:
-            events["base_com"] = EventTermCfg(
-                mode = "startup",
-                func = dr.body_com_offset,
-                params = {
-                    "asset_cfg": body_cfg,
-                    "operation": "add",                     # 在默认质心坐标上累加偏移量
-                    "ranges": {
-                        0: tuple(self.robot_cfg.domain_rand.com_displacement_range), # X 轴偏移范围
-                        1: tuple(self.robot_cfg.domain_rand.com_displacement_range), # Y 轴偏移范围
-                        2: tuple(self.robot_cfg.domain_rand.com_displacement_range), # Z 轴偏移范围
+            # 质心
+            if self.robot_cfg.domain_rand.randomize_com_displacement:
+                events["base_com"] = EventTermCfg(
+                    mode = "startup",
+                    func = dr.body_com_offset,
+                    params = {
+                        "asset_cfg": body_cfg,
+                        "operation": "add",                     # 在默认质心坐标上累加偏移量
+                        "ranges": {
+                            0: tuple(self.robot_cfg.domain_rand.com_displacement_range), # X 轴偏移范围
+                            1: tuple(self.robot_cfg.domain_rand.com_displacement_range), # Y 轴偏移范围
+                            2: tuple(self.robot_cfg.domain_rand.com_displacement_range), # Z 轴偏移范围
+                        },
                     },
-                },
-            )
+                )
 
-        # 除base外其他link质量：
-        if self.robot_cfg.domain_rand.randomize_link_mass:
-            pass
+            # 除base外其他link质量：
+            if self.robot_cfg.domain_rand.randomize_link_mass:
+                events["link_mass"] = EventTermCfg(
+                    mode = "startup",
+                    func = dr.body_mass,
+                    params = {
+                        "asset_cfg": link_cfg,
+                        "operation": "scale",
+                        "ranges": tuple(self.robot_cfg.domain_rand.link_mass_range),
+                    },
+                )
 
-        # 关节摩擦
-        if self.robot_cfg.domain_rand.randomize_joint_friction:
-            events["joint_friction"] = EventTermCfg(
-                mode="startup",
-                func=dr.joint_friction,
-                params={
-                    "asset_cfg": joint_cfg,
-                    "operation": "abs",
-                    "ranges": tuple(self.robot_cfg.domain_rand.joint_friction_range),
-                },
-            )
+            # 关节摩擦
+            if self.robot_cfg.domain_rand.randomize_joint_friction:
+                events["joint_friction"] = EventTermCfg(
+                    mode="startup",
+                    func=dr.joint_friction,
+                    params={
+                        "asset_cfg": joint_cfg,
+                        "operation": "abs",
+                        "ranges": tuple(self.robot_cfg.domain_rand.joint_friction_range),
+                    },
+                )
 
-        # 关节阻尼
-        if self.robot_cfg.domain_rand.randomize_joint_damping:
-            events["joint_damping"] = EventTermCfg(
-                mode="startup",
-                func=dr.joint_damping,
-                params={
-                    "asset_cfg": joint_cfg,
-                    "operation": "abs",
-                    "ranges": tuple(self.robot_cfg.domain_rand.joint_damping_range),
-                },
-            )
+            # 关节阻尼
+            if self.robot_cfg.domain_rand.randomize_joint_damping:
+                events["joint_damping"] = EventTermCfg(
+                    mode="startup",
+                    func=dr.joint_damping,
+                    params={
+                        "asset_cfg": joint_cfg,
+                        "operation": "abs",
+                        "ranges": tuple(self.robot_cfg.domain_rand.joint_damping_range),
+                    },
+                )
 
-        # 关节等效转动惯量
-        if self.robot_cfg.domain_rand.randomize_joint_armature:
-            pass
+            # 关节等效转动惯量
+            if self.robot_cfg.domain_rand.randomize_joint_armature:
+                events[] = EventTermCfg(
+                    mode = "startup",
+                    func = dr.joint_armature,
+                    params = {
+                        "asset_cfg": joint_cfg,
+                        "operation": "abs",
+                        "ranges": tuple(self.robot_cfg.domain_rand.joint_armature_range),
+                    },
+                )
+            
+            # --------- 接触与外力随机化 ----------
+            # push
+            if self.robot_cfg.domain_rand.push_robots:
+                events["push_robot"] = EventTermCfg(
+                    mode = "interval",
+                    func = mdp.push_by_setting_velocity,
+                    params = {
+                        "velocity_range": {
+                            "x": tuple(self.robot_cfg.domain_rand.push_vel_xy),
+                            "y": tuple(self.robot_cfg.domain_rand.push_vel_xy),
+                            "z": tuple(self.robot_cfg.domain_rand.push_vel_z),
+                            "roll": tuple(self.robot_cfg.domain_rand.push_ang_rp),
+                            "pitch": tuple(self.robot_cfg.domain_rand.push_ang_rp),
+                            "yaw": tuple(self.robot_cfg.domain_rand.push_ang_y),
+                        }
+                    }
+                )
+                
+            # 接触摩擦力
+            if self.robot_cfg.domain_rand.frandomize_friction:
+                events["friction"] = EventTermCfg(
+                    mode = "startup",
+                    func = dr.geom_friction,
+                    params = {
+                        "asset_cfg": foot_cfg,
+                        "operation": "abs",
+                        "ranges": tuple(self.robot_cfg.domain_rand.friction_range),
+                        "shared_random": True,              # All foot geoms share the same friction.
+                    }
+                )
 
-        # --------- 接触与外力随机化 ----------
-        if self.robot_cfg.domain_rand.push_robots:
-            pass
+            # --------- 控制器与执行器随机化 ----------
+            # motor offset
+            if self.robot_cfg.domain_rand.randomize_motor_zero_offset:
+                events["encoder_bias"] = EventTermCfg(
+                    mode = "startup",
+                    func = dr.encoder_bias,
+                    params = {
+                        "asset_cfg": joint_cfg,
+                        "bias_range": tuple(self.robot_cfg.domain_rand.motor_zero_offset_range),
+                    },
+                )
 
+            # pd
+            if self.robot_cfg.domain_rand.randomize_pd_gains:
+                events["pd_gains"] = EventTermCfg(
+                    func = dr.pd_gains,
+                    mode = "startup",
+                    params = {
+                        "asset_cfg": actuator_cfg,
+                        "operation": "scale",          # 在标称增益上乘比例系数
+                        "kp_range": tuple(self.robot_cfg.domain_rand.stiffness_multiplier_range),
+                        "kd_range": tuple(self.robot_cfg.domain_rand.damping_multiplier_range),
+                    }
+                )
 
+            # effort_limits
+            if self.robot_cfg.domain_rand.randomize_motor_strength:
+                events["effort_limits"]  = EventTermCfg(
+                    mode = "startup",
+                    func = dr.effort_limits,
+                    params = {
+                        "asset_cfg" : actuator_cfg,
+                        "operation" : "scale",
+                        "effort_limit_range" : tuple(self.robot_cfg.domain_rand.motor_strength_range)
+                    }
+                )
+            
+            return events
 
-        # --------- 控制器与执行器随机化 ----------
-        if self.robot_cfg.domain_rand.randomize_motor_zero_offset:
-            events["encoder_bias"] = EventTermCfg(
-                mode="startup",
-                func=dr.encoder_bias,
-                params={
-                    "asset_cfg": joint_cfg,
-                    "bias_range": tuple(self.robot_cfg.domain_rand.motor_zero_offset_range),
-                },
-            )
-
-        if self.robot_cfg.domain_rand.randomize_pd_gains:
-            events["pd_gains"] = EventTermCfg(
-                func = dr.pd_gains,
-                mode = "startup",
-                params = {
-                    "asset_cfg": actuator_cfg,
-                    "operation": "scale",          # 在标称增益上乘比例系数
-                    "kp_range": tuple(self.robot_cfg.domain_rand.stiffness_multiplier_range),
-                    "kd_range": tuple(self.robot_cfg.domain_rand.damping_multiplier_range),
-                }
-            )
-
-        
         return events
 
     def _build_commands(self, debug_vis):

@@ -101,7 +101,7 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
             # ---------------------------------- 动力学参数随机化 ---------------------------------- #
             # 基座负载质量
             randomize_payload_mass = True
-            payload_mass_range = [-2.5, 2.5]
+            payload_mass_range = [-1.0, 3.0]
     
             # 其他link质量
             randomize_link_mass = True
@@ -126,7 +126,7 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
             # ---------------------------------- 接触与外力随机化 ---------------------------------- #
             # 地面摩擦力
             randomize_friction = True
-            friction_range = [0.2, 1.3]
+            friction_range = [0.3, 1.6]
             
             # 恢复系数
             randomize_restitution = True
@@ -134,8 +134,11 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
     
             # 随机推机器人
             push_robots = True
-            push_interval_s = 4
-            max_push_vel_xy = 1.0
+            push_interval_s = [4.0, 6.0]
+            push_vel_xy = [-0.5, 0.5]
+            push_vel_z = [-0.4, 0.4]
+            push_ang_rp = [-0.5, 0.5]
+            push_ang_y = [-0.78, 0.78]
     
             # ---------------------------------- 控制器与执行器随机化 ------------------------------- #
             # 比例增益
@@ -145,8 +148,7 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
     
             # 电机零位误差
             randomize_motor_zero_offset = True
-            motor_zero_pos_offset_range = [-0.035, 0.035]
-            motor_zero_vel_offset_range = [-0.01, 0.01]
+            motor_zero_offset_range = [-0.035, 0.035]
 
             # 电机输出强度
             randomize_motor_strength = True
