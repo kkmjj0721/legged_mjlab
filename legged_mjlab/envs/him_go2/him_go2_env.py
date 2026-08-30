@@ -267,6 +267,12 @@ class HimGo2Env(ManagerBasedRlEnv):
         )
 
         base_pose = {}
+        if self.robot_cfg.domain_rand.randomize_base_pose and not play:
+            base_pose = {
+                "z" : tuple(self.robot_cfg.domain_rand.base_pose_z_range),
+                "roll": tuple(self.robot_cfg.domain_rand.base_pose_roll_range),
+                "pitch": tuple(self.robot_cfg.domain_rand.base_pose_pitch_range),
+            }
 
         # 初始化基础事件字典（默认包含每次环境 reset 时的状态重置项）
         events = {
@@ -275,11 +281,14 @@ class HimGo2Env(ManagerBasedRlEnv):
                 func = mdp.reset_root_state_uniform,
                 mode = "reset",                       # 触发时机：每次环境重置时
                 params = {
+                    "asset_cfg": body_cfg,
                     "pose_range": {
-                        "x": (-0.5, 0.5),
-                        "y": (-0.5, 0.5),
-                        "z": (0.0, 0.0),
-                        "yaw": (-3.14, 3.14),
+                        "x": (-0.0, 0.0),
+                        "y": (-0.0, 0.0),
+                        "z": base_pose.get("z", (0.0, 0.0)),
+                        "roll": base_pose.get("roll", (0.0, 0.0)),
+                        "pitch": base_pose.get("pitch", (0.0, 0.0)),
+                        "yaw": (-0.0, 0.0),
                     },
                     "velocity_range": {},
                 }
@@ -365,7 +374,7 @@ class HimGo2Env(ManagerBasedRlEnv):
 
             # 关节等效转动惯量
             if self.robot_cfg.domain_rand.randomize_joint_armature:
-                events[] = EventTermCfg(
+                events["joint_armature"] = EventTermCfg(
                     mode = "startup",
                     func = dr.joint_armature,
                     params = {

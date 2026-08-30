@@ -170,7 +170,11 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
             action_hold_prob = 0.3
 
             # ---------------------------------- 初始化姿态随机化 --------------------------------- #
-            # 初始
+            # 重置姿态
+            randomize_base_pose = True
+            base_pose_z_range = [0.35, 0.5]
+            base_pose_roll_range = [-3.14, 3.14]     
+            base_pose_pitch_range = [-3.14, 3.14]    
 
 
     class rewards( LeggedMjlabCfg.rewards ):
