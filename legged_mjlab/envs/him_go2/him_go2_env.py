@@ -1,5 +1,6 @@
 import torch
 import copy
+import math
 
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.scene import SceneCfg 
@@ -28,6 +29,8 @@ from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from legged_mjlab.envs.him_go2.go2_asset import Go2Asset
 from legged_mjlab.envs.him_go2.him_go2_config import HimGo2RoughCfg
+
+from legged_mjlab.utils.helpers import class_to_dict
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
@@ -91,8 +94,6 @@ class HimGo2Env(ManagerBasedRlEnv):
             terminations = self._build_terminations(),                      # 挂载终止条件管理器配置
             commands = self._build_commands(debug_vis),                     # 构建指令管理器配置
             curriculum = self._build_curriculum(play),                      # 构建课程训练管理配置
-            # metrics = ,                                                     # 构建任务评估管理器
-            scale_rewards_by_dt = False,
         )
 
     def _build_scene(self, asset, play, debug_vis = False):
@@ -627,50 +628,33 @@ class HimGo2Env(ManagerBasedRlEnv):
 
         return curriculums
 
-    def _reward_scale(self, name):
-            """ 返回指定奖励项的缩放系数，若不存在则返回 0
-            """
-            return self.robot_cfg.rewards.scales.get(name, 0.0)
-    
-    def _add_reward(self, terms, name, func, params=None):
-        """ 通用奖励项注册辅助函数：仅当权重非零时才加入计算图
+    def _prepare_reward_function(self):
+        """ Prepares a list of reward functions, whcih will be called to compute the total reward.
+            Looks for self._reward_<REWARD_NAME>, where <REWARD_NAME> are names of all non zero reward scales in the cfg.
         """
-        weight = self._reward_scale(name)
+        self.reward_scales = class_to_dict(self.robot_cfg.rewards.scales)
 
-        if weight == 0.0:
-            return
+        for key in list(self.reward_scales.keys()):
+            scale = self.reward_scales[key]
+            if scale == 0:
+                self.reward_scales.pop(key, None) 
 
-        terms[name] = RewardTermCfg(
-            func = func,
-            weight = weight,
-            params = dict(params or {}),
-        )
-
-    def _entity_term_cfg(self):
-            """ 
-            """
-            return SceneEntityCfg(
-                name=self.cfg.asset.name,
-                joint_names=self._joint_names(),
-                preserve_order=True,
+        reward_functions = {}
+        for name, scale in self.reward_scales.items():
+            if name=="termination":
+                continue
+            reward_functions[name] = RewardTermCfg(
+                weight = scale,
+                func = getattr(self, '_reward_' + name),
             )
-    
-    def _build_rewards(self):
-        """ 
-            官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/rewards.html
-        """
 
-        robot_cfg = SceneEntityCfg(name = self.robot_cfg.asset.name)
-        joint_cfg = self._entity_term_cfg()
-        terms = {}
-
-        return terms
+        return reward_functions
 
 # ----------------- rewards -----------------
 
-    def track_linear_velocity(
+    def _reward_tracking_lin_vel(
+        self,
         env: ManagerBasedRlEnv,
-        std: float,
         command_name: str,
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ) -> torch.Tensor:
@@ -685,9 +669,9 @@ class HimGo2Env(ManagerBasedRlEnv):
         xy_error = torch.sum(torch.square(command[:, :2] - actual[:, :2]), dim=1)
         z_error = torch.square(actual[:, 2])
         lin_vel_error = xy_error + (2 * z_error)
-        return torch.exp(-lin_vel_error / std**2)
-
-    def track_angular_velocity(
+        return torch.exp(-lin_vel_error / self.robot_cfg.rewards.tracking_sigma**2)
+    
+    def _reward_tracking_ang_vel(
         env: ManagerBasedRlEnv,
         std: float,
         command_name: str,
@@ -706,21 +690,21 @@ class HimGo2Env(ManagerBasedRlEnv):
         ang_vel_error = z_error + (0.05 * xy_error)
         return torch.exp(-ang_vel_error / std**2)
 
-    def lin_vel_z(
+    def _reward_lin_vel_z(
         env: ManagerBasedRlEnv,
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ) -> torch.Tensor:
         asset: Entity = env.scene[asset_cfg.name]
         return torch.square(asset.data.root_link_lin_vel_b[:, 2])
 
-    def ang_vel_xy(
+    def _reward_ang_vel_xy(
         env: ManagerBasedRlEnv,
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ) -> torch.Tensor:
         asset: Entity = env.scene[asset_cfg.name]
         return torch.sum(torch.square(asset.data.root_link_ang_vel_b[:, :2]), dim=1)
 
-    def body_orientation_l2(
+    def _reward_body_orientation_l2(
         env: ManagerBasedRlEnv,
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ) -> torch.Tensor:
@@ -741,7 +725,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             xy_squared = torch.sum(torch.square(asset.data.projected_gravity_b[:, :2]), dim=1)
         return xy_squared
 
-    def feet_air_time(
+    def _reward_feet_air_time(
         env: ManagerBasedRlEnv,
         sensor_name: str,
         threshold: float = 0.4,
@@ -771,7 +755,7 @@ class HimGo2Env(ManagerBasedRlEnv):
                 reward *= scale
         return reward
 
-    def self_collision_cost(
+    def _reward__collision_cost(
         env: ManagerBasedRlEnv,
         sensor_name: str,
         force_threshold: float = 10.0,
@@ -786,7 +770,7 @@ class HimGo2Env(ManagerBasedRlEnv):
         assert data.found is not None
         return data.found.squeeze(-1)
 
-    def hip_pos(
+    def _reward_hip_pos(
         env: ManagerBasedRlEnv,
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ) -> torch.Tensor:
@@ -799,12 +783,12 @@ class HimGo2Env(ManagerBasedRlEnv):
         )
         return torch.sum(torch.square(diff_angle), dim=1)
 
-    def _base_height_l2(env, target_height: float, asset_cfg: SceneEntityCfg):
+    def _reward_base_height_l2(env, target_height: float, asset_cfg: SceneEntityCfg):
         asset = env.scene[asset_cfg.name]
         height = asset.data.root_link_pos_w[:, 2] - env.scene.env_origins[:, 2]
         return torch.square(height - target_height)
 
-    def feet_clearance(
+    def _reward_feet_clearance(
         env: ManagerBasedRlEnv,
         target_height: float,
         command_name: str | None = None,
@@ -827,13 +811,13 @@ class HimGo2Env(ManagerBasedRlEnv):
                 cost = cost * active
         return cost
 
-    def _joint_power_l1(env, asset_cfg: SceneEntityCfg):
+    def _reward_joint_power_l1(env, asset_cfg: SceneEntityCfg):
         asset = env.scene[asset_cfg.name]
         torque = asset.data.qfrc_actuator[:, asset_cfg.joint_ids]
         velocity = asset.data.joint_vel[:, asset_cfg.joint_ids]
         return torch.sum(torch.abs(torque * velocity), dim=1)
 
-    def stand_still(
+    def _reward_stand_still(
         env: ManagerBasedRlEnv,
         command_name: str,
         command_threshold: float = 0.1,
@@ -852,7 +836,7 @@ class HimGo2Env(ManagerBasedRlEnv):
                 reward *= scale
         return reward
 
-    def _torque_limit_cost(
+    def _reward_torque_limit_cost(
         env,
         soft_limit: float,
         asset_cfg: SceneEntityCfg,
@@ -875,7 +859,29 @@ class HimGo2Env(ManagerBasedRlEnv):
         limits = limits[:, asset_cfg.actuator_ids]
         denominator = torch.clamp(limits * max(float(soft_limit), 1.0e-6), min=1.0e-6)
         excess = torch.relu(torch.abs(force) / denominator - 1.0)
+    
         return torch.sum(torch.square(excess), dim=1)
 
+    def _reward_action_rate(env: ManagerBasedRlEnv):
+        # Penalize changes in actions
+        action_manager = env.action_manager
+        action_rate = action_manager.action - action_manager.prev_action
+        return torch.sum(torch.square(action_rate), dim=1)
+
+    def _reward_smoothness(env: ManagerBasedRlEnv):
+        # second order smoothness
+        action_manager = env.action_manager
+        smoothness = (action_manager.action - 2.0 * action_manager.prev_action + action_manager.prev_prev_action)
+        return torch.sum(torch.square(smoothness), dim=1)
+    
+    def _reward_dof_pos_limits(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg):
+        """惩罚：关节角度超出软限位（防止撞击机械限位）。"""
+        asset: Entity = env.scene[asset_cfg.name]
+        joint_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]
+        soft_limits = asset.data.soft_joint_pos_limits[:, asset_cfg.joint_ids] # 获取软限位
+        lower, upper = soft_limits[..., 0], soft_limits[..., 1]
+        # 计算低于下限或高于上限的部分
+        violation = torch.relu(lower - joint_pos) + torch.relu(joint_pos - upper)
+        return torch.sum(violation, dim=1)
 
     

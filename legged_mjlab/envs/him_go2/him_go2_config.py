@@ -203,7 +203,7 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
 
         only_positive_rewards = True # if true negative total rewards are clipped at zero (avoids early termination problems)
         tracking_sigma = 0.25 # tracking reward = exp(-error^2/sigma)
-        soft_dof_pos_limit = 0.85 # percentage of urdf limits, values above this limit are penalized
+        soft_dof_pos_limit = 0.9 # percentage of urdf limits, values above this limit are penalized
         soft_dof_vel_limit = 1.
         soft_torque_limit = 1.
         base_height_target = 0.30
