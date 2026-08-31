@@ -90,7 +90,7 @@ class HimGo2Env(ManagerBasedRlEnv):
                 azimuth=90.0,
             ),                    
             episode_length_s = self.robot_cfg.env.episode_length_s,         # 单回合最长时间
-            rewards = self._build_rewards(),                                # 挂载奖励管理器配置
+            rewards = self._prepare_reward_function(),                      # 挂载奖励管理器配置
             terminations = self._build_terminations(),                      # 挂载终止条件管理器配置
             commands = self._build_commands(debug_vis),                     # 构建指令管理器配置
             curriculum = self._build_curriculum(play),                      # 构建课程训练管理配置
@@ -655,42 +655,31 @@ class HimGo2Env(ManagerBasedRlEnv):
     def _reward_tracking_lin_vel(
         self,
         env: ManagerBasedRlEnv,
-        command_name: str,
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ) -> torch.Tensor:
-        """Reward for tracking the commanded base linear velocity.
-
-        The commanded z velocity is assumed to be zero.
-        """
+        # Tracking of linear velocity commands (xy axes)
         asset: Entity = env.scene[asset_cfg.name]
-        command = env.command_manager.get_command(command_name)
-        assert command is not None, f"Command '{command_name}' not found."
-        actual = asset.data.root_link_lin_vel_b
-        xy_error = torch.sum(torch.square(command[:, :2] - actual[:, :2]), dim=1)
-        z_error = torch.square(actual[:, 2])
-        lin_vel_error = xy_error + (2 * z_error)
-        return torch.exp(-lin_vel_error / self.robot_cfg.rewards.tracking_sigma**2)
+        command = env.command_manager.get_command("twist")
+        assert command is not None, f"Command '{"twist"}' not found."
+        
+        lin_vel_error = torch.sum(torch.square(command[:, :2] - asset.data.root_link_lin_vel_b[:, :2]), dim=1)
+        return torch.exp(-lin_vel_error / self.robot_cfg.rewards.tracking_sigma)
     
     def _reward_tracking_ang_vel(
+        self,
         env: ManagerBasedRlEnv,
-        std: float,
-        command_name: str,
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ) -> torch.Tensor:
-        """Reward heading error for heading-controlled envs, angular velocity for others.
-
-        The commanded xy angular velocities are assumed to be zero.
-        """
+        # Tracking of angular velocity commands (yaw) 
         asset: Entity = env.scene[asset_cfg.name]
-        command = env.command_manager.get_command(command_name)
-        assert command is not None, f"Command '{command_name}' not found."
-        actual = asset.data.root_link_ang_vel_b
-        z_error = torch.square(command[:, 2] - actual[:, 2])
-        xy_error = torch.sum(torch.square(actual[:, :2]), dim=1)
-        ang_vel_error = z_error + (0.05 * xy_error)
-        return torch.exp(-ang_vel_error / std**2)
+        command = env.command_manager.get_command("twist")
+        assert command is not None, f"Command '{"twist"}' not found."
+        
+        ang_vel_error = torch.square(command[:, 2] - asset.data.root_link_ang_vel_b[:, 2])
+        return torch.exp(-ang_vel_error / self.robot_cfg.rewards.tracking_sigma)
 
     def _reward_lin_vel_z(
+        self,
         env: ManagerBasedRlEnv,
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ) -> torch.Tensor:
@@ -698,13 +687,15 @@ class HimGo2Env(ManagerBasedRlEnv):
         return torch.square(asset.data.root_link_lin_vel_b[:, 2])
 
     def _reward_ang_vel_xy(
+        self,
         env: ManagerBasedRlEnv,
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ) -> torch.Tensor:
         asset: Entity = env.scene[asset_cfg.name]
         return torch.sum(torch.square(asset.data.root_link_ang_vel_b[:, :2]), dim=1)
 
-    def _reward_body_orientation_l2(
+    def _reward_orientation(
+        self,
         env: ManagerBasedRlEnv,
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ) -> torch.Tensor:
@@ -725,15 +716,70 @@ class HimGo2Env(ManagerBasedRlEnv):
             xy_squared = torch.sum(torch.square(asset.data.projected_gravity_b[:, :2]), dim=1)
         return xy_squared
 
-    def _reward_feet_air_time(
+    def _reward_joint_power(
+        self,
+        env: ManagerBasedRlEnv, 
+        asset_cfg: SceneEntityCfg
+    ):
+        # Penalize high power
+        asset = env.scene[asset_cfg.name]
+        torque = asset.data.qfrc_actuator[:, asset_cfg.joint_ids]
+        velocity = asset.data.joint_vel[:, asset_cfg.joint_ids]
+        return torch.sum(torch.abs(torque * velocity), dim=1)
+
+    def _reward_base_height(
+        self,
+        env: ManagerBasedRlEnv, 
+        asset_cfg: SceneEntityCfg
+    ):
+        # Penalize base height away from target
+        asset = env.scene[asset_cfg.name]
+        height = asset.data.root_link_pos_w[:, 2] - env.scene.env_origins[:, 2]
+        return torch.square(height - self.robot_cfg.rewards.base_height_target)
+
+    def _reward_feet_clearance(
+        self,
         env: ManagerBasedRlEnv,
-        sensor_name: str,
+        command_threshold: float = 0.1,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    ) -> torch.Tensor:
+        asset: Entity = env.scene[asset_cfg.name]
+        foot_z = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]
+        foot_vel_xy = asset.data.site_lin_vel_w[:, asset_cfg.site_ids, :2]
+        vel_norm = torch.norm(foot_vel_xy, dim=-1)
+        delta = torch.abs(foot_z - self.robot_cfg.rewards.clearance_height_target)
+        cost = torch.sum(delta * vel_norm, dim=1)
+
+        command = env.command_manager.get_command("twist")
+        if command is not None:
+            linear_norm = torch.norm(command[:, :2], dim=1)
+            angular_norm = torch.abs(command[:, 2])
+            total_command = linear_norm + angular_norm
+            active = (total_command > command_threshold).float()
+            cost = cost * active
+
+        return cost
+
+    def _reward_action_rate(self, env: ManagerBasedRlEnv):
+            # Penalize changes in actions
+            action_manager = env.action_manager
+            action_rate = action_manager.action - action_manager.prev_action
+            return torch.sum(torch.square(action_rate), dim=1)
+
+    def _reward_smoothness(self, env: ManagerBasedRlEnv):
+        # second order smoothness
+        action_manager = env.action_manager
+        smoothness = (action_manager.action - 2.0 * action_manager.prev_action + action_manager.prev_prev_action)
+        return torch.sum(torch.square(smoothness), dim=1)
+
+    def _reward_feet_air_time(
+        self,
+        env: ManagerBasedRlEnv,
         threshold: float = 0.4,
-        command_name: str | None = None,
         command_threshold: float = 0.1,
     ) -> torch.Tensor:
         """Reward feet air time."""
-        sensor: ContactSensor = env.scene[sensor_name]
+        sensor: ContactSensor = env.scene["feet_ground_contact"]
         sensor_data = sensor.data
         air_time = sensor_data.current_air_time
         contact_time = sensor_data.current_contact_time
@@ -745,23 +791,23 @@ class HimGo2Env(ManagerBasedRlEnv):
         )[0]
         error = torch.abs(mode_time - threshold)
         reward = torch.clamp(threshold - error, min=0.0)
-        if command_name is not None:
-            command = env.command_manager.get_command(command_name)
-            if command is not None:
-                linear_norm = torch.norm(command[:, :2], dim=1)
-                angular_norm = torch.abs(command[:, 2])
-                total_command = linear_norm + angular_norm
-                scale = (total_command > command_threshold).float()
-                reward *= scale
+
+        command = env.command_manager.get_command("twist")
+        if command is not None:
+            linear_norm = torch.norm(command[:, :2], dim=1)
+            angular_norm = torch.abs(command[:, 2])
+            total_command = linear_norm + angular_norm
+            scale = (total_command > command_threshold).float()
+            reward *= scale
         return reward
 
-    def _reward__collision_cost(
+    def _reward_collision(
+        self,
         env: ManagerBasedRlEnv,
-        sensor_name: str,
         force_threshold: float = 10.0,
     ) -> torch.Tensor:
         """Penalize self-collisions."""
-        sensor: ContactSensor = env.scene[sensor_name]
+        sensor: ContactSensor = env.scene["nonfoot_ground_touch"]
         data = sensor.data
         if data.force_history is not None:
             force_mag = torch.norm(data.force_history, dim=-1)
@@ -771,6 +817,7 @@ class HimGo2Env(ManagerBasedRlEnv):
         return data.found.squeeze(-1)
 
     def _reward_hip_pos(
+        self,
         env: ManagerBasedRlEnv,
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ) -> torch.Tensor:
@@ -782,62 +829,43 @@ class HimGo2Env(ManagerBasedRlEnv):
             - default_joint_pos[:, asset_cfg.joint_ids]
         )
         return torch.sum(torch.square(diff_angle), dim=1)
-
-    def _reward_base_height_l2(env, target_height: float, asset_cfg: SceneEntityCfg):
-        asset = env.scene[asset_cfg.name]
-        height = asset.data.root_link_pos_w[:, 2] - env.scene.env_origins[:, 2]
-        return torch.square(height - target_height)
-
-    def _reward_feet_clearance(
-        env: ManagerBasedRlEnv,
-        target_height: float,
-        command_name: str | None = None,
-        command_threshold: float = 0.1,
-        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-    ) -> torch.Tensor:
-        asset: Entity = env.scene[asset_cfg.name]
-        foot_z = asset.data.site_pos_w[:, asset_cfg.site_ids, 2]
-        foot_vel_xy = asset.data.site_lin_vel_w[:, asset_cfg.site_ids, :2]
-        vel_norm = torch.norm(foot_vel_xy, dim=-1)
-        delta = torch.abs(foot_z - target_height)
-        cost = torch.sum(delta * vel_norm, dim=1)
-        if command_name is not None:
-            command = env.command_manager.get_command(command_name)
-            if command is not None:
-                linear_norm = torch.norm(command[:, :2], dim=1)
-                angular_norm = torch.abs(command[:, 2])
-                total_command = linear_norm + angular_norm
-                active = (total_command > command_threshold).float()
-                cost = cost * active
-        return cost
-
-    def _reward_joint_power_l1(env, asset_cfg: SceneEntityCfg):
-        asset = env.scene[asset_cfg.name]
-        torque = asset.data.qfrc_actuator[:, asset_cfg.joint_ids]
-        velocity = asset.data.joint_vel[:, asset_cfg.joint_ids]
-        return torch.sum(torch.abs(torque * velocity), dim=1)
-
+  
     def _reward_stand_still(
+        self,
         env: ManagerBasedRlEnv,
-        command_name: str,
         command_threshold: float = 0.1,
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ) -> torch.Tensor:
         asset: Entity = env.scene[asset_cfg.name]
         diff_angle = asset.data.joint_pos[:, asset_cfg.joint_ids] - asset.data.default_joint_pos[:, asset_cfg.joint_ids]
         reward = torch.sum(torch.square(diff_angle), dim=1)
-        if command_name is not None:
-            command = env.command_manager.get_command(command_name)
-            if command is not None:
-                linear_norm = torch.norm(command[:, :2], dim=1)
-                angular_norm = torch.abs(command[:, 2])
-                total_command = linear_norm + angular_norm
-                scale = (total_command <= command_threshold).float()
-                reward *= scale
-        return reward
 
-    def _reward_torque_limit_cost(
-        env,
+        command = env.command_manager.get_command("twist")
+        if command is not None:
+            linear_norm = torch.norm(command[:, :2], dim=1)
+            angular_norm = torch.abs(command[:, 2])
+            total_command = linear_norm + angular_norm
+            scale = (total_command <= command_threshold).float()
+            reward *= scale
+        return reward
+    
+    def _reward_dof_pos_limits(
+        self,
+        env: ManagerBasedRlEnv, 
+        asset_cfg: SceneEntityCfg
+    ):
+        """惩罚：关节角度超出软限位（防止撞击机械限位）。"""
+        asset: Entity = env.scene[asset_cfg.name]
+        joint_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]
+        soft_limits = asset.data.soft_joint_pos_limits[:, asset_cfg.joint_ids] # 获取软限位
+        lower, upper = soft_limits[..., 0], soft_limits[..., 1]
+        # 计算低于下限或高于上限的部分
+        violation = torch.relu(lower - joint_pos) + torch.relu(joint_pos - upper)
+        return torch.sum(violation, dim=1)
+
+    def _reward_torque_limit(
+        self,
+        env: ManagerBasedRlEnv,
         soft_limit: float,
         asset_cfg: SceneEntityCfg,
     ):
@@ -862,26 +890,5 @@ class HimGo2Env(ManagerBasedRlEnv):
     
         return torch.sum(torch.square(excess), dim=1)
 
-    def _reward_action_rate(env: ManagerBasedRlEnv):
-        # Penalize changes in actions
-        action_manager = env.action_manager
-        action_rate = action_manager.action - action_manager.prev_action
-        return torch.sum(torch.square(action_rate), dim=1)
-
-    def _reward_smoothness(env: ManagerBasedRlEnv):
-        # second order smoothness
-        action_manager = env.action_manager
-        smoothness = (action_manager.action - 2.0 * action_manager.prev_action + action_manager.prev_prev_action)
-        return torch.sum(torch.square(smoothness), dim=1)
-    
-    def _reward_dof_pos_limits(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg):
-        """惩罚：关节角度超出软限位（防止撞击机械限位）。"""
-        asset: Entity = env.scene[asset_cfg.name]
-        joint_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]
-        soft_limits = asset.data.soft_joint_pos_limits[:, asset_cfg.joint_ids] # 获取软限位
-        lower, upper = soft_limits[..., 0], soft_limits[..., 1]
-        # 计算低于下限或高于上限的部分
-        violation = torch.relu(lower - joint_pos) + torch.relu(joint_pos - upper)
-        return torch.sum(violation, dim=1)
 
     

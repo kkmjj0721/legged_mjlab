@@ -209,6 +209,8 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
         base_height_target = 0.30
         max_contact_force = 100. # forces above this value are penalized
         clearance_height_target = -0.2
+        
+
 
 
 class HimGo2CfgPPO(LeggedMjlabCfgPPO):

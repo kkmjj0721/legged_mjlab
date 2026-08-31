@@ -251,7 +251,8 @@ class Go2Asset:
             termination_body_names = tuple(self.asset.termination_contact_names)
 
             return ContactSensorCfg(
-
+                name = "",
+                
             )
 
         def get_height_scan_sensor(self, entity_name: str, debug_vis: bool = False) -> RayCastSensorCfg:
