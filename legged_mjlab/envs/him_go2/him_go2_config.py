@@ -48,7 +48,7 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
             curriculum = True
             max_curriculum = 1.0
             num_commands = 4  # [lin_vel_x, lin_vel_y, ang_vel_yaw, heading]
-            resampling_time = 10.0  # [s] time before new command is given
+            resampling_time = [4.0, 8.0]  # [s] time before new command is given
             heading_command = False  # if true: compute ang vel command from heading error
             class ranges:
                 lin_vel_x = [-1.0, 1.0]  # min max [m/s]
@@ -85,7 +85,7 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
         action_scale = 0.25
         # decimation: Number of control action updates @ sim DT per policy DT
         decimation = 4
-        hip_reduction = 1.0
+        hip_reduction = 0.5
         
 
     class asset(LeggedMjlabCfg.asset):

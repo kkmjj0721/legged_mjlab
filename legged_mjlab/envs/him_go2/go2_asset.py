@@ -20,17 +20,17 @@ from mjlab.sensor import (
 )
 from mjlab.utils.spec_config import CollisionCfg
 
-
 from legged_mjlab.envs.him_go2.him_go2_config import HimGo2RoughCfg
 
 
 class Go2Asset:
     def __init__(self, cfg: HimGo2RoughCfg):
         self.cfg = cfg
-        self._parse_cfg(self.cfg)
-
+        
         self.entity = self.entitycfg(self)
         self.sensor_mgr = self.sensor(self)
+
+        self._parse_cfg(self.cfg)
 
     def _resolve_xml_path(self, raw_path: str) -> Path:
         """解析 MJCF 路径：替换占位符、解析绝对路径并校验存在性"""
@@ -71,7 +71,7 @@ class Go2Asset:
         self.vel_limit = self.cfg.rewards.soft_dof_vel_limit
         self.pos_limit = self.cfg.rewards.soft_dof_pos_limit
 
-        self.joint_names = tuple(self.robot_cfg.init_state.default_joint_angles.keys())
+        self.joint_names = tuple(self.cfg.init_state.default_joint_angles.keys())
 
         if self.cfg.domain_rand.randomize_cmd_action_latency:
             self.action_delay = self.cfg.domain_rand.range_cmd_action_latency
@@ -85,20 +85,20 @@ class Go2Asset:
             self.action_hold_prob = 0
 
         # 从 MJCF 中读取真实 body 名称，排除 world body
-        spec = self.asset.entity.get_spec()
+        spec = self.entity.get_spec()
         self.body_names = tuple(
             body.name for body in spec.worldbody.find_all("body")
         )
 
         # 根据配置中的字符串筛选 body
         self.penalized_contact_names = []
-        for name in self.asset.cfg.asset.penalize_contacts_on:
+        for name in self.cfg.asset.penalize_contacts_on:
             self.penalized_contact_names.extend(
                 [s for s in self.body_names if name in s]
             )
 
         self.termination_contact_names = []
-        for name in self.asset.cfg.asset.terminate_after_contacts_on:
+        for name in self.cfg.asset.terminate_after_contacts_on:
             self.termination_contact_names.extend(
                 [s for s in self.body_names if name in s]
             )
@@ -242,7 +242,6 @@ class Go2Asset:
                 reduce = "maxforce",
                 num_slots = 1,
                 history_length = self.asset.cfg.control.decimation,
-                exclude_parent_body = True,
             )
 
         def get_termination_contact_sensor(self, entity_name: str) -> ContactSensorCfg:
@@ -252,7 +251,9 @@ class Go2Asset:
 
             return ContactSensorCfg(
                 name = "",
-                
+                primary = ContactMatch(
+
+                )
             )
 
         def get_height_scan_sensor(self, entity_name: str, debug_vis: bool = False) -> RayCastSensorCfg:
@@ -278,16 +279,19 @@ class Go2Asset:
                 ray_alignment = "yaw",
                 max_distance = 5.0,              
                 debug_vis = bool(debug_vis),     # 是否在 GUI 中绘制扫描射线
-                history_length = self.asset.cfg.control.decimation
+                exclude_parent_body = True,
+                viz = RayCastSensorCfg.VizCfg(show_normals=True),
             )
 
-        def get_all_sensors(self, debug_vis: bool = False) -> Dict[str, Any]:
+        def get_all_sensors(self, entity_name: str, debug_vis: bool = False) -> Dict[str, Any]:
             sensors = {
-                "feet_ground_contact": self.get_foot_contact_sensor(),
-                "illegal_contact": self.get_illegal_contact_sensor(),
+                "feet_ground_contact": self.get_foot_contact_sensor(entity_name),
+                "illegal_contact": self.get_illegal_contact_sensor(entity_name),
             }
+
             if getattr(self.asset.cfg.terrain, "measure_heights", False):
-                sensors["height_scan"] = self.get_height_scan_sensor(debug_vis=debug_vis)
+                sensors["height_scan"] = self.get_height_scan_sensor(entity_name, debug_vis = debug_vis)
+
             return sensors
 
 

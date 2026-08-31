@@ -50,9 +50,6 @@ class HimGo2Env(ManagerBasedRlEnv):
         # 组装并生成 mjlab 规范的 ManagerBasedRlEnvCfg
         self.managercfg = self._build_mjlab_managercfg(play = self.play, debug_vis = debug_vis)
 
-        # 记录是否只保留正向奖励（截断负奖励）
-        self.only_positive_rewards = self.robot_cfg.rewards.only_positive_rewards
-
         # 完成底层 MuJoCo 仿真器与各 Manager 的实例化
         super().__init__(
             cfg = self.managercfg,
@@ -109,7 +106,10 @@ class HimGo2Env(ManagerBasedRlEnv):
                 entity_name: self.asset.entity.get_robot_cfg()
             },                                  
             sensors = tuple(                                                            # 构建并挂载传感器元组
-                self._build_sensors(debug_vis = debug_vis)
+                self._build_sensors(
+                    entity_name = entity_name,
+                    debug_vis = debug_vis
+                )
             ),
             extent = self.robot_cfg.env.extent
         )
@@ -204,11 +204,11 @@ class HimGo2Env(ManagerBasedRlEnv):
         action_scales = {}
         for name in self.asset.joint_names:
             if "hip" in name:
-                action_scales[name] = float(self.robot_cfg.control.action_scale * self.robot_cfg.control.hip_scale_reduction)
+                action_scales[name] = float(self.robot_cfg.control.action_scale * self.robot_cfg.control.hip_reduction)
             else:
                 action_scales[name] = float(self.robot_cfg.control.action_scale)
 
-        clip_val = self.robot_cfg.control.action_clip
+        clip_val = self.robot_cfg.normalization.clip_actions
         if isinstance(clip_val, (int, float)):
             action_clip = (-float(clip_val), float(clip_val))
         else:
@@ -217,7 +217,7 @@ class HimGo2Env(ManagerBasedRlEnv):
         return {
             "joint_position": JointPositionActionCfg(
                 entity_name = self.robot_cfg.asset.name,
-                actuator_name = self.asset.joint_names,
+                actuator_names = self.asset.joint_names,
                 scale = action_scales,    
                 use_default_offset = True,                  # 使用位置增量
                 preserve_order = True,                      # 严格保持关节顺序与 policy 输出对齐
@@ -660,7 +660,7 @@ class HimGo2Env(ManagerBasedRlEnv):
         # Tracking of linear velocity commands (xy axes)
         asset: Entity = env.scene[asset_cfg.name]
         command = env.command_manager.get_command("twist")
-        assert command is not None, f"Command '{"twist"}' not found."
+        assert command is not None, "Command 'twist' not found."
         
         lin_vel_error = torch.sum(torch.square(command[:, :2] - asset.data.root_link_lin_vel_b[:, :2]), dim=1)
         return torch.exp(-lin_vel_error / self.robot_cfg.rewards.tracking_sigma)
@@ -673,7 +673,7 @@ class HimGo2Env(ManagerBasedRlEnv):
         # Tracking of angular velocity commands (yaw) 
         asset: Entity = env.scene[asset_cfg.name]
         command = env.command_manager.get_command("twist")
-        assert command is not None, f"Command '{"twist"}' not found."
+        assert command is not None, "Command 'twist' not found."
         
         ang_vel_error = torch.square(command[:, 2] - asset.data.root_link_ang_vel_b[:, 2])
         return torch.exp(-ang_vel_error / self.robot_cfg.rewards.tracking_sigma)
