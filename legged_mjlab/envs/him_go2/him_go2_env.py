@@ -729,7 +729,7 @@ class HimGo2Env(ManagerBasedRlEnv):
     def _reward_dof_acc(
         self,
         env: ManagerBasedRlEnv,
-        asset_cfg: SceneEntityCfg
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ):
         pass
         
@@ -737,7 +737,7 @@ class HimGo2Env(ManagerBasedRlEnv):
     def _reward_joint_power(
         self,
         env: ManagerBasedRlEnv, 
-        asset_cfg: SceneEntityCfg
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ):
         # Penalize high power
         asset = env.scene[asset_cfg.name]
@@ -748,7 +748,7 @@ class HimGo2Env(ManagerBasedRlEnv):
     def _reward_base_height(
         self,
         env: ManagerBasedRlEnv, 
-        asset_cfg: SceneEntityCfg
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ):
         # Penalize base height away from target
         asset = env.scene[asset_cfg.name]
@@ -870,7 +870,7 @@ class HimGo2Env(ManagerBasedRlEnv):
     def _reward_dof_pos_limits(
         self,
         env: ManagerBasedRlEnv, 
-        asset_cfg: SceneEntityCfg
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ):
         """惩罚：关节角度超出软限位（防止撞击机械限位）。"""
         asset: Entity = env.scene[asset_cfg.name]
@@ -885,7 +885,7 @@ class HimGo2Env(ManagerBasedRlEnv):
         self,
         env: ManagerBasedRlEnv,
         soft_limit: float,
-        asset_cfg: SceneEntityCfg,
+        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
     ):
         """Penalize actuator output above each configured Ideal-PD effort limit."""
 
