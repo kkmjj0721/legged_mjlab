@@ -489,6 +489,13 @@ class HimGo2Env(ManagerBasedRlEnv):
         """
         entity_name = self.robot_cfg.asset.name
 
+        joint_cfg = SceneEntityCfg(
+            entity_name,
+            joint_names=self.asset.joint_names,
+            preserve_order=True,
+        )
+        base_cfg = SceneEntityCfg(entity_name, body_names=("base_link",))
+
         # clip
         clip_val = self.robot_cfg.normalization.clip_observations
         clip_obs = (-clip_val, clip_val)
@@ -535,6 +542,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             ),
             "projected_gravity": ObservationTermCfg(
                 func = mdp.projected_gravity,
+                params={"asset_cfg": base_cfg},
                 noise = noise.get("gravity"),
                 delay_min_lag = imu_delay_min,
                 delay_max_lag = imu_delay_max,
@@ -542,6 +550,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             ),
             "joint_pos": ObservationTermCfg(
                 func = mdp.joint_pos_rel,
+                params={"asset_cfg": joint_cfg},
                 scale = self.robot_cfg.normalization.obs_scales.dof_pos,
                 noise = noise.get("dof_pos"),
                 delay_min_lag = motor_delay_min,
@@ -550,6 +559,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             ),
             "joint_vel": ObservationTermCfg(
                 func = mdp.joint_vel_rel,
+                params={"asset_cfg": joint_cfg},
                 scale = self.robot_cfg.normalization.obs_scales.dof_vel,
                 noise = noise.get("dof_vel"),
                 delay_min_lag = motor_delay_min,
@@ -557,7 +567,10 @@ class HimGo2Env(ManagerBasedRlEnv):
                 clip = clip_obs,
             ),
             "last_action": ObservationTermCfg(
-                func = mdp.last_action
+                func = mdp.last_action,
+                params={
+                    "action_name": "joint_position"
+                },
             ),
         }
 
@@ -569,17 +582,20 @@ class HimGo2Env(ManagerBasedRlEnv):
             critic_term.delay_max_lag = 0
             critic_term.noise = None       # 强制移除噪声
             critic_terms[name] = critic_term
+        
         critic_terms.update({
             "base_lin_vel": ObservationTermCfg(
-                func = mdp.builtin_sensor,
+                func=mdp.builtin_sensor,
                 params={"sensor_name": f"{entity_name}/imu_lin_vel"},
             ),
-            "height_scan": ObservationTermCfg(
-                func = mdp.height_scan,
-                params={"sensor_name": "height_scan"},
-                scale = self.robot_cfg.normalization.obs_scales.height_measurements,
-            ),
         })
+
+        if self.robot_cfg.terrain.measure_heights:
+            critic_terms["height_scan"] = ObservationTermCfg(
+                func=mdp.height_scan,
+                params={"sensor_name": "height_scan"},
+                scale=self.robot_cfg.normalization.obs_scales.height_measurements,
+            )
 
         obs = {
             "actor": ObservationGroupCfg(
@@ -618,10 +634,14 @@ class HimGo2Env(ManagerBasedRlEnv):
         if play:
             return curriculums
 
+        entity_name = self.robot_cfg.asset.name
         if self.robot_cfg.terrain.curriculum:
             curriculums["terrain_levels"] = CurriculumTermCfg(
                 func = mdp.terrain_levels_vel,
-                params={"command_name": "twist"},
+                params={
+                    "command_name": "twist",
+                    "asset_cfg": SceneEntityCfg(entity_name)
+                },
             )
 
         if self.robot_cfg.commands.curriculum:
@@ -880,33 +900,6 @@ class HimGo2Env(ManagerBasedRlEnv):
         # 计算低于下限或高于上限的部分
         violation = torch.relu(lower - joint_pos) + torch.relu(joint_pos - upper)
         return torch.sum(violation, dim=1)
-
-    def _reward_torque_limits(
-        self,
-        env: ManagerBasedRlEnv,
-        soft_limit: float,
-        asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-    ):
-        """Penalize actuator output above each configured Ideal-PD effort limit."""
-
-        asset = env.scene[asset_cfg.name]
-        force = asset.data.actuator_force
-        limits = torch.full_like(force, float("inf"))
-
-        # Go2Asset creates three IdealPdActuator groups.  Their force_limit tensors
-        # are per-environment, so the term also remains valid after effort-limit DR.
-        for actuator in asset.actuators:
-            force_limit = getattr(actuator, "force_limit", None)
-            if force_limit is None:
-                continue
-            limits[:, actuator.ctrl_ids] = force_limit
-
-        force = force[:, asset_cfg.actuator_ids]
-        limits = limits[:, asset_cfg.actuator_ids]
-        denominator = torch.clamp(limits * max(float(soft_limit), 1.0e-6), min=1.0e-6)
-        excess = torch.relu(torch.abs(force) / denominator - 1.0)
-    
-        return torch.sum(torch.square(excess), dim=1)
 
 
     

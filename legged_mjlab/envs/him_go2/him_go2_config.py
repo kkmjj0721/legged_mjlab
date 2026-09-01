@@ -198,7 +198,6 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
             dof_vel = -0.0
             dof_pos_limits = -10.0
             dof_vel_limits = -0.0
-            torque_limits = -1.0
             hip_pos = -1.0
 
         only_positive_rewards = True # if true negative total rewards are clipped at zero (avoids early termination problems)
