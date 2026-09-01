@@ -2,6 +2,8 @@ import torch
 import copy
 import math
 
+from dataclasses import replace
+
 from mjlab.envs import ManagerBasedRlEnv, ManagerBasedRlEnvCfg
 from mjlab.scene import SceneCfg 
 from mjlab.entity import Entity
@@ -25,6 +27,7 @@ from mjlab.managers import (
 from mjlab.sensor import ContactSensor
 from mjlab.terrains import TerrainEntityCfg
 from mjlab.terrains.terrain_generator import TerrainGeneratorCfg
+from mjlab.terrains.config import ROUGH_TERRAINS_CFG
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.tasks.velocity.mdp import UniformVelocityCommandCfg
 from legged_mjlab.envs.him_go2.go2_asset import Go2Asset
@@ -150,52 +153,58 @@ class HimGo2Env(ManagerBasedRlEnv):
         if self.robot_cfg.terrain.mesh_type == "generator":
             return TerrainEntityCfg(
                 terrain_type = "generator",
-                terrain_generator = TerrainGeneratorCfg(
-                    curriculum = True,
-                    size = (self.robot_cfg.terrain.terrain_length, self.robot_cfg.terrain.terrain_width),            # 子地形大小
-                    num_rows = self.robot_cfg.terrain.num_rows,                                                # 地形行数（难度等级）
-                    num_cols = self.robot_cfg.terrain.num_cols,                                                # 地形列数（地形类型）
-                    border_width = self.robot_cfg.terrain.border_size,                                         # 边界宽度
-                    sub_terrains = {
-                        # 1. 平坦地面类型
-                        "flat": terrain_gen.BoxFlatTerrainCfg(
-                            proportion = 0.2        # 占比 20%
-                        ),
-
-                        # 2.金字塔台阶地形类型（楼梯）
-                        "stairs": terrain_gen.BoxPyramidStairsTerrainCfg(
-                            proportion = 0.2,                             
-                            step_height_range = (0.0, 0.20),              # 台阶高度范围（难度从 0.0m 逐渐加大到 0.20m）
-                            step_width = 0.3,                             # 每个台阶的踏步宽度为 0.3 米
-                            platform_width = 2.0,                         # 金字塔顶部的中央平坦平台宽度为 2.0 米
-                        ),
-
-                        # 3. 随机高度场崎岖地形类型（碎石路、粗糙砂石地面）
-                        "rough": terrain_gen.HfRandomUniformTerrainCfg(
-                            proportion = 0.2,                 
-                            noise_range = (0.02, 0.10),       # 随机起伏高度范围（噪声幅度从 2cm 逐渐增加到 10cm）
-                            noise_step = 0.02,                # 噪声高度的离散采样步长为 0.02 米
-                        ),
-
-                        # 4. 柏林噪声连续起伏地形（缓坡/土丘/旷野）
-                        "perlin_noise": terrain_gen.HfPerlinNoiseTerrainCfg(
-                            proportion=0.2,
-                            noise_range = (0.05, 0.30),                   # 波峰/土丘最大起伏高度（从 5cm 递增至 30cm）
-                            noise_step=0.02,  
-                        ),
-
-                        # 5. 离散凸起障碍高度场（随机柱状/方块障碍)
-                        "discrete_obstacles": terrain_gen.HfDiscreteObstaclesTerrainCfg(
-                            proportion = 0.2,
-                            obstacle_height_range = (0.05, 0.20),           # 障碍高度范围（从 5cm 递增至 20cm）
-                            obstacle_width_range = (0.4, 0.8),              # 障碍物宽度/边长范围（0.4m ~ 0.8m）
-                            num_obstacles = 12,                             # 每个子地形块内生成的障碍物数量
-                            platform_width = 1.5,                           # 中心预留平坦出生区域宽度（避免出生直接卡入障碍）
-                        )
-                    },
-                ),
-                max_init_terrain_level = 5
+                terrain_generator = replace(ROUGH_TERRAINS_CFG),
+                max_init_terrain_level = 5,
             )
+
+            # return TerrainEntityCfg(
+            #     terrain_type = "generator",
+            #     terrain_generator = TerrainGeneratorCfg(
+            #         curriculum = True,
+            #         size = (self.robot_cfg.terrain.terrain_length, self.robot_cfg.terrain.terrain_width),            # 子地形大小
+            #         num_rows = self.robot_cfg.terrain.num_rows,                                                # 地形行数（难度等级）
+            #         num_cols = self.robot_cfg.terrain.num_cols,                                                # 地形列数（地形类型）
+            #         border_width = self.robot_cfg.terrain.border_size,                                         # 边界宽度
+            #         sub_terrains = {
+            #             # 1. 平坦地面类型
+            #             "flat": terrain_gen.BoxFlatTerrainCfg(
+            #                 proportion = 0.2        # 占比 20%
+            #             ),
+
+            #             # 2.金字塔台阶地形类型（楼梯）
+            #             "stairs": terrain_gen.BoxPyramidStairsTerrainCfg(
+            #                 proportion = 0.2,                             
+            #                 step_height_range = (0.0, 0.20),              # 台阶高度范围（难度从 0.0m 逐渐加大到 0.20m）
+            #                 step_width = 0.3,                             # 每个台阶的踏步宽度为 0.3 米
+            #                 platform_width = 2.0,                         # 金字塔顶部的中央平坦平台宽度为 2.0 米
+            #             ),
+
+            #             # 3. 随机高度场崎岖地形类型（碎石路、粗糙砂石地面）
+            #             "rough": terrain_gen.HfRandomUniformTerrainCfg(
+            #                 proportion = 0.2,                 
+            #                 noise_range = (0.02, 0.10),       # 随机起伏高度范围（噪声幅度从 2cm 逐渐增加到 10cm）
+            #                 noise_step = 0.02,                # 噪声高度的离散采样步长为 0.02 米
+            #             ),
+
+            #             # 4. 柏林噪声连续起伏地形（缓坡/土丘/旷野）
+            #             "perlin_noise": terrain_gen.HfPerlinNoiseTerrainCfg(
+            #                 proportion=0.2,
+            #                 noise_range = (0.05, 0.30),                   # 波峰/土丘最大起伏高度（从 5cm 递增至 30cm）
+            #                 noise_step=0.02,  
+            #             ),
+
+            #             # 5. 离散凸起障碍高度场（随机柱状/方块障碍)
+            #             "discrete_obstacles": terrain_gen.HfDiscreteObstaclesTerrainCfg(
+            #                 proportion = 0.2,
+            #                 obstacle_height_range = (0.05, 0.20),           # 障碍高度范围（从 5cm 递增至 20cm）
+            #                 obstacle_width_range = (0.4, 0.8),              # 障碍物宽度/边长范围（0.4m ~ 0.8m）
+            #                 num_obstacles = 12,                             # 每个子地形块内生成的障碍物数量
+            #                 platform_width = 1.5,                           # 中心预留平坦出生区域宽度（避免出生直接卡入障碍）
+            #             )
+            #         },
+            #     ),
+            #     max_init_terrain_level = 5
+            # )
         
     def _build_actions(self):
         """ 构建关节位置动作空间：输出值经 action_scale 缩放后，加到 default 关节偏置上，这里的 offset 为静态偏置
@@ -564,11 +573,11 @@ class HimGo2Env(ManagerBasedRlEnv):
         critic_terms.update({
             "base_lin_vel": ObservationTermCfg(
                 func = mdp.builtin_sensor,
-                params={"sensor_name": "robot/imu_lin_vel"},
+                params={"sensor_name": f"{entity_name}/imu_lin_vel"},
             ),
             "height_scan": ObservationTermCfg(
                 func = mdp.height_scan,
-                params={"sensor_name": "terrain_scan"},
+                params={"sensor_name": "height_scan"},
                 scale = self.robot_cfg.normalization.obs_scales.height_measurements,
             ),
         })
