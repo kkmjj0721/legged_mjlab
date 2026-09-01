@@ -218,10 +218,9 @@ class HimGo2Env(ManagerBasedRlEnv):
                 action_scales[name] = float(self.robot_cfg.control.action_scale)
 
         clip_val = self.robot_cfg.normalization.clip_actions
-        if isinstance(clip_val, (int, float)):
-            action_clip = (-float(clip_val), float(clip_val))
-        else:
-            action_clip = clip_val
+        action_clip = {}
+        for name in self.asset.joint_names:
+            action_clip[name] = (-float(clip_val), float(clip_val))
 
         return {
             "joint_position": JointPositionActionCfg(
@@ -479,7 +478,7 @@ class HimGo2Env(ManagerBasedRlEnv):
                     lin_vel_x = tuple(ranges.lin_vel_x),
                     lin_vel_y = tuple(ranges.lin_vel_y),
                     ang_vel_z = tuple(ranges.ang_vel_yaw),
-                    heading = tuple(ranges.heading),
+                    # heading = tuple(ranges.heading),
                 )
             )
         }
