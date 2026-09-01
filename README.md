@@ -13,3 +13,7 @@ MuJoCo Warp 和独立 RSL-RL 算法包。
 
 
 ## 参考项目：
+
+- [Unitree_rl_mjlab](https://github.com/unitreerobotics/unitree_rl_mjlab)
+- [mjlab](https://github.com/mujocolab/mjlab)
+- [himloco](https://github.com/InternRobotics/HIMLoco)
