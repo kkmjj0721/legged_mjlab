@@ -172,7 +172,7 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
             # ---------------------------------- 初始化姿态随机化 --------------------------------- #
             # 重置姿态
             randomize_base_pose = True
-            base_pose_z_range = [0.35, 0.5]
+            base_pose_z_range = [-0.10, 0.10]
             base_pose_roll_range = [-3.14, 3.14]     
             base_pose_pitch_range = [-3.14, 3.14]    
 
@@ -207,7 +207,7 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
         soft_torque_limit = 1.
         base_height_target = 0.30
         max_contact_force = 100. # forces above this value are penalized
-        clearance_height_target = -0.2
+        clearance_height_target = 0.20
         
 
 

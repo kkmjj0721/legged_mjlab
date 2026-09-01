@@ -73,21 +73,21 @@ class HimGo2Env(ManagerBasedRlEnv):
             events = self._build_events(play),                              # 挂载事件管理器配置（reset, domain_rand）
             seed = self.robot_cfg.env.seed,                                 # 随机种子
             sim = SimulationCfg(                                            # 仿真引擎底层设置
-                nconmax=35,
-                njmax=1500,
+                nconmax = 35,
+                njmax = 1500,
                 mujoco = MujocoCfg(
                     timestep = self.robot_cfg.sim.dt,          # 物理仿真步长
-                    iterations=10,
-                    ls_iterations=20,
+                    iterations = 10,
+                    ls_iterations = 20,
                 )
             ),                         
             viewer = ViewerConfig(                                          # 
                 origin_type = ViewerConfig.OriginType.ASSET_BODY,
                 entity_name = entity_name,
                 body_name = "base",
-                distance=3.0,
-                elevation=-5.0,
-                azimuth=90.0,
+                distance = 3.0,
+                elevation = -5.0,
+                azimuth = 90.0,
             ),                    
             episode_length_s = self.robot_cfg.env.episode_length_s,         # 单回合最长时间
             rewards = self._prepare_reward_function(),                      # 挂载奖励管理器配置
@@ -144,9 +144,9 @@ class HimGo2Env(ManagerBasedRlEnv):
         # plane
         if self.robot_cfg.terrain.mesh_type == "plane":
             return TerrainEntityCfg(
-                terrain_type="plane",
-                terrain_generator=None,
-                debug_vis=False,
+                terrain_type = "plane",
+                terrain_generator = None,
+                debug_vis = False,
             )
 
         # terrain
@@ -253,10 +253,10 @@ class HimGo2Env(ManagerBasedRlEnv):
 
         foot_cfg = SceneEntityCfg(
             entity_name,
-            geom_names=tuple(
+            geom_names = tuple(
                 f"{leg}_foot_collision" for leg in ("FL", "FR", "RL", "RR")
             ),
-            preserve_order=True,
+            preserve_order = True,
         )
 
         body_cfg = SceneEntityCfg(entity_name, body_names=("base_link",))
@@ -353,9 +353,9 @@ class HimGo2Env(ManagerBasedRlEnv):
             # 关节摩擦
             if self.robot_cfg.domain_rand.randomize_joint_friction:
                 events["joint_friction"] = EventTermCfg(
-                    mode="startup",
-                    func=dr.joint_friction,
-                    params={
+                    mode = "startup",
+                    func = dr.joint_friction,
+                    params = {
                         "asset_cfg": joint_cfg,
                         "operation": "abs",
                         "ranges": tuple(self.robot_cfg.domain_rand.joint_friction_range),
@@ -365,9 +365,9 @@ class HimGo2Env(ManagerBasedRlEnv):
             # 关节阻尼
             if self.robot_cfg.domain_rand.randomize_joint_damping:
                 events["joint_damping"] = EventTermCfg(
-                    mode="startup",
-                    func=dr.joint_damping,
-                    params={
+                    mode = "startup",
+                    func = dr.joint_damping,
+                    params = {
                         "asset_cfg": joint_cfg,
                         "operation": "abs",
                         "ranges": tuple(self.robot_cfg.domain_rand.joint_damping_range),
@@ -599,7 +599,7 @@ class HimGo2Env(ManagerBasedRlEnv):
 
         obs = {
             "actor": ObservationGroupCfg(
-                terms=actor_terms,
+                terms = actor_terms,
                 concatenate_terms = True,
                 enable_corruption = True,
                 history_length=1,
@@ -671,7 +671,7 @@ class HimGo2Env(ManagerBasedRlEnv):
 
         reward_functions = {}
         for name, scale in self.reward_scales.items():
-            if name=="termination":
+            if name == "termination":
                 continue
             reward_functions[name] = RewardTermCfg(
                 weight = scale,
@@ -750,10 +750,13 @@ class HimGo2Env(ManagerBasedRlEnv):
         self,
         env: ManagerBasedRlEnv,
         asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
-    ):
-        pass
+    ) -> torch.Tensor:
+        """Penalize joint accelerations using L2 squared kernel."""
+        asset: Entity = env.scene[asset_cfg.name]
+        # 获取指定关节的加速度并计算 L2 平方和 [num_envs]
+        joint_acc = asset.data.joint_acc[:, asset_cfg.joint_ids]
+        return torch.sum(torch.square(joint_acc), dim=1)
         
-
     def _reward_joint_power(
         self,
         env: ManagerBasedRlEnv, 
@@ -862,10 +865,9 @@ class HimGo2Env(ManagerBasedRlEnv):
         asset: Entity = env.scene[asset_cfg.name]
         default_joint_pos = asset.data.default_joint_pos
         assert default_joint_pos is not None
-        diff_angle = (
-            asset.data.joint_pos[:, asset_cfg.joint_ids]
-            - default_joint_pos[:, asset_cfg.joint_ids]
-        )
+        # 仅针对 4 个 hip 关节计算偏差 (FL, RL, FR, RR)
+        hip_ids = [0, 3, 6, 9]
+        diff_angle = asset.data.joint_pos[:, hip_ids] - default_joint_pos[:, hip_ids]
         return torch.sum(torch.square(diff_angle), dim=1)
   
     def _reward_stand_still(
@@ -901,5 +903,3 @@ class HimGo2Env(ManagerBasedRlEnv):
         violation = torch.relu(lower - joint_pos) + torch.relu(joint_pos - upper)
         return torch.sum(violation, dim=1)
 
-
-    

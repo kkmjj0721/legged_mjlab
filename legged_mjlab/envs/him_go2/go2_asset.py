@@ -250,10 +250,20 @@ class Go2Asset:
             termination_body_names = tuple(self.asset.termination_contact_names)
 
             return ContactSensorCfg(
-                name = "",
+                name = "termination_contact",
                 primary = ContactMatch(
-
-                )
+                    mode = "body",
+                    pattern = termination_body_names,
+                    entity = entity_name,
+                ),
+                secondary = ContactMatch(
+                    mode = "body",
+                    pattern = "terrain",
+                ),
+                fields = ("found", "force"),
+                reduce = "maxforce",
+                num_slots = 1,
+                history_length = self.asset.cfg.control.decimation,
             )
 
         def get_height_scan_sensor(self, entity_name: str, debug_vis: bool = False) -> RayCastSensorCfg:
