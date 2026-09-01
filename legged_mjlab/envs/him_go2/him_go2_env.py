@@ -84,7 +84,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             viewer = ViewerConfig(                                          # 
                 origin_type = ViewerConfig.OriginType.ASSET_BODY,
                 entity_name = entity_name,
-                body_name = "base",
+                body_name = "base_link",
                 distance = 3.0,
                 elevation = -5.0,
                 azimuth = 90.0,
@@ -151,9 +151,12 @@ class HimGo2Env(ManagerBasedRlEnv):
 
         # terrain
         if self.robot_cfg.terrain.mesh_type == "generator":
+            terrain_cfg = replace(ROUGH_TERRAINS_CFG)
+            terrain_cfg.curriculum = self.robot_cfg.terrain.curriculum
+
             return TerrainEntityCfg(
                 terrain_type = "generator",
-                terrain_generator = replace(ROUGH_TERRAINS_CFG),
+                terrain_generator = terrain_cfg,
                 max_init_terrain_level = 5,
             )
 
@@ -753,9 +756,7 @@ class HimGo2Env(ManagerBasedRlEnv):
     ) -> torch.Tensor:
         """Penalize joint accelerations using L2 squared kernel."""
         asset: Entity = env.scene[asset_cfg.name]
-        # 获取指定关节的加速度并计算 L2 平方和 [num_envs]
-        joint_acc = asset.data.joint_acc[:, asset_cfg.joint_ids]
-        return torch.sum(torch.square(joint_acc), dim=1)
+        return torch.sum(torch.square(asset.data.joint_acc[:, asset_cfg.joint_ids]), dim=1)
         
     def _reward_joint_power(
         self,
@@ -802,10 +803,10 @@ class HimGo2Env(ManagerBasedRlEnv):
         return cost
 
     def _reward_action_rate(self, env: ManagerBasedRlEnv):
-            # Penalize changes in actions
-            action_manager = env.action_manager
-            action_rate = action_manager.action - action_manager.prev_action
-            return torch.sum(torch.square(action_rate), dim=1)
+        # Penalize changes in actions
+        return torch.sum(
+            torch.square(env.action_manager.action - env.action_manager.prev_action), dim=1
+        )
 
     def _reward_smoothness(self, env: ManagerBasedRlEnv):
         # second order smoothness
@@ -896,10 +897,15 @@ class HimGo2Env(ManagerBasedRlEnv):
     ):
         """惩罚：关节角度超出软限位（防止撞击机械限位）。"""
         asset: Entity = env.scene[asset_cfg.name]
-        joint_pos = asset.data.joint_pos[:, asset_cfg.joint_ids]
-        soft_limits = asset.data.soft_joint_pos_limits[:, asset_cfg.joint_ids] # 获取软限位
-        lower, upper = soft_limits[..., 0], soft_limits[..., 1]
-        # 计算低于下限或高于上限的部分
-        violation = torch.relu(lower - joint_pos) + torch.relu(joint_pos - upper)
-        return torch.sum(violation, dim=1)
+        soft_joint_pos_limits = asset.data.soft_joint_pos_limits
+        assert soft_joint_pos_limits is not None
+        out_of_limits = -(
+        asset.data.joint_pos[:, asset_cfg.joint_ids]
+        - soft_joint_pos_limits[:, asset_cfg.joint_ids, 0]
+        ).clip(max=0.0)
+        out_of_limits += (
+        asset.data.joint_pos[:, asset_cfg.joint_ids]
+        - soft_joint_pos_limits[:, asset_cfg.joint_ids, 1]
+        ).clip(min=0.0)
+        return torch.sum(out_of_limits, dim=1)
 

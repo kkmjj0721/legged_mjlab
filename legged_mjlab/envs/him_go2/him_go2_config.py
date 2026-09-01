@@ -173,8 +173,10 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
             # 重置姿态
             randomize_base_pose = True
             base_pose_z_range = [-0.10, 0.10]
-            base_pose_roll_range = [-3.14, 3.14]     
-            base_pose_pitch_range = [-3.14, 3.14]    
+            base_pose_roll_range = [-0.0, 0.0]     
+            base_pose_pitch_range = [-0.0, 0.0]
+            # base_pose_roll_range = [-3.14, 3.14]     
+            # base_pose_pitch_range = [-3.14, 3.14]    
 
 
     class rewards( LeggedMjlabCfg.rewards ):
@@ -186,7 +188,7 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
             orientation = -0.2
             dof_acc = -2.5e-7
             joint_power = -2e-5
-            base_height = -1.0
+            base_height = -0.0
             foot_clearance = -0.01
             action_rate = -0.01
             smoothness = -0.01
