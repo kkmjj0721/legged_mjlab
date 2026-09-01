@@ -383,6 +383,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             if self.robot_cfg.domain_rand.push_robots:
                 events["push_robot"] = EventTermCfg(
                     mode = "interval",
+                    interval_range_s = tuple(self.robot_cfg.domain_rand.push_interval_s),
                     func = mdp.push_by_setting_velocity,
                     params = {
                         "velocity_range": {
@@ -392,12 +393,13 @@ class HimGo2Env(ManagerBasedRlEnv):
                             "roll": tuple(self.robot_cfg.domain_rand.push_ang_rp),
                             "pitch": tuple(self.robot_cfg.domain_rand.push_ang_rp),
                             "yaw": tuple(self.robot_cfg.domain_rand.push_ang_y),
-                        }
+                        },
+                        "asset_cfg" : SceneEntityCfg(entity_name),
                     }
                 )
                 
             # 接触摩擦力
-            if self.robot_cfg.domain_rand.frandomize_friction:
+            if self.robot_cfg.domain_rand.randomize_friction:
                 events["friction"] = EventTermCfg(
                     mode = "startup",
                     func = dr.geom_friction,
@@ -477,7 +479,7 @@ class HimGo2Env(ManagerBasedRlEnv):
         """ 构建观测组
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/observations.html
         """
-        entity_name = self.cfg.asset.name
+        entity_name = self.robot_cfg.asset.name
 
         # clip
         clip_val = self.robot_cfg.normalization.clip_observations

@@ -4,9 +4,9 @@
 
 审计基线：
 
-- Git HEAD：`1cdefbb`
+- Git HEAD：`0916c8d`
 - Python 解释器：`/home/kk/legged_mjlab/.venv/bin/python`
-- 工作树状态：当前工作树为 dirty，至少包含本文档和 `legged_mjlab/envs/him_go2/go2_asset.py` 的未提交修改；后者不是本次文档补丁写入对象。
+- 工作树状态：当前工作树为 dirty，包含本文档和 `legged_mjlab/envs/him_go2/him_go2_env.py` 的未提交修改；源码文件不是本次文档补丁写入对象。
 - 结论边界：本文所有代码片段都是迁移建议，不代表已经写入源码；所有 `PASS/FAIL/NOT_RUN` 只适用于上述工作树和本地 `.venv`。
 
 范围：
@@ -26,8 +26,8 @@
 |---|---|---|
 | HIM 配置骨架 | `HimGo2RoughCfg`、`HimGo2CfgPPO` 已有，声明了 45 单帧观测、6 帧历史、12 动作、HIM runner/policy/algorithm。见 `legged_mjlab/envs/him_go2/him_go2_config.py:6`、`:8`、`:216`。 | 基本写了，但字段仍有多处和 env 实现不一致。 |
 | HIM wrapper / 外部旧版 `rsl_rl` 链路 | `HIMRslRlWrapper` 固定 `[N,270] = 6 x 45` 历史，`HIMOnPolicyRunner` 在本地 `rsl_rl/` 中存在。见 `legged_mjlab/wrappers/him_wrapper.py:14`、`rsl_rl/rsl_rl/runners/him_on_policy_runner.py:165`。 | 结构基本明确，但 critic 235 与 runner 实际 48 的契约要重新写清。 |
-| asset 资源 | `go2.xml` 和 OBJ mesh 存在；XML 有 floating base、12 个关节、足端 collision/site、IMU sensor。见 `resources/robots/unitree_go2/xmls/go2.xml:41`、`:53`、`:155`。 | 资源基本齐，但 `Go2Asset` Python 封装当前不能正常初始化。 |
-| env 实现 | `HimGo2Env` 已尝试按 mjlab manager 风格组装 scene、action、events、obs、reward、termination。见 `legged_mjlab/envs/him_go2/him_go2_env.py:38`。 | 尚未闭环，有语法、构造、字段、reward 注册等硬阻塞。 |
+| asset 资源 | `go2.xml` 和 OBJ mesh 存在；XML 有 floating base、12 个关节、足端 collision/site、IMU sensor。见 `resources/robots/unitree_go2/xmls/go2.xml:41`、`:53`、`:155`。当前 `Go2Asset(HimGo2RoughCfg())` 已能基础构造，读到 XML path、12 个 joint、`base_link`。 | 资源和基础 Python 封装已过第一层 smoke；但 termination contact sensor 仍是不完整占位，action order 也还没冻结。 |
+| env 实现 | `HimGo2Env` 已尝试按 mjlab manager 风格组装 scene、action、events、obs、reward、termination。见 `legged_mjlab/envs/him_go2/him_go2_env.py:38`。当前 AST 和 env import 已通过。 | 尚未闭环，`task_registry.make_env("him_go2")` 仍卡在构造函数 `device=` 参数不匹配，后面还有 action/command/observation/event/reward 注册问题。 |
 | 随机姿态 reset | 配置有 roll/pitch 全范围随机和 z 随机。见 `him_go2_config.py:174`。 | 目前更像“空中随机姿态跌落”，不是贴地倒姿起身 reset。 |
 | 起身奖励 | 当前 reward 仍是 locomotion 风格，`orientation` 还无法区分正立和倒立。见 `him_go2_env.py:697`。 | 需要单独迁移 recovery reward，不建议在现有行走 reward 上小修。 |
 
@@ -117,15 +117,14 @@ HIMOnPolicyRunner / HIMPPO:
 
 这些说明配置方向是对的：你是在搭 legged_gym 风格的 mjlab 训练框架，而不是直接采用 mjlab 官方新版 `rsl_rl` 流程。
 
-### 4.2 Config 中需要修的错配
+### 4.2 Config 中当前仍需要修的错配
 
 必须先修的配置/实现错配：
 
 | 问题 | 证据 | 影响 |
 |---|---|---|
-| `control` 里是 `hip_reduction`，env 里访问 `hip_scale_reduction`。 | `him_go2_config.py:88` vs `him_go2_env.py:207` | 构建 action cfg 会 `AttributeError`。 |
-| config 没有 `action_clip`，env 访问 `self.robot_cfg.control.action_clip`。 | `him_go2_env.py:211` | 构建 action cfg 会失败。 |
-| `commands.resampling_time` 是 float，env 写成 `tuple(self.robot_cfg.commands.resampling_time)`。 | `him_go2_config.py:51`、`him_go2_env.py:462` | `tuple(10.0)` 会 `TypeError`；mjlab 需要 range tuple 时应显式表达。 |
+| action clip 现在改成读取 `normalization.clip_actions`，但传给 `JointPositionActionCfg.clip` 的仍是 tuple。 | `him_go2_env.py:211-224` | mjlab 1.6.0 action term 需要按名称匹配的 dict；tuple 会在构建 action term 时进入错误类型路径。并且 `clip_actions=100` 不是 raw action 的 `[-1,1]` 安全门。 |
+| `heading_command=False`，但 env 仍把 `ranges.heading` 传成非空 tuple。 | `him_go2_config.py:52-57`、`him_go2_env.py:466-471`；本地 mjlab 1.6.0 `UniformVelocityCommand.__init__()` 会拒绝该组合。 | 修完 env 构造函数后，command manager 构造会继续失败；关闭 heading command 时应传 `heading=None`。 |
 | config 是 `randomize_friction`，env 写 `frandomize_friction`。 | `him_go2_config.py:128`、`him_go2_env.py:400` | 摩擦随机化分支访问不存在字段。 |
 | `randomize_restitution` 配了，但 env 没有 restitution event。 | `him_go2_config.py:131-133`、`him_go2_env.py:302-448` | 配置不会生效。 |
 | reward scales 里有 `dof_acc`、`foot_clearance`、`torque_limits`，env 中对应函数名不闭合。 | `him_go2_config.py:187`、`:190`、`:201`；`him_go2_env.py:631-649`、`:866` | reward builder 使用 `getattr(self, "_reward_" + name)`，会直接失败。 |
@@ -156,16 +155,22 @@ XML 中能看到：
 
 所以 asset 资源层面不是主要问题。
 
-### 5.2 Python asset 封装未闭合
+### 5.2 Python asset 封装当前状态
 
-`Go2Asset` 当前会在初始化阶段失败：
+这部分已经改过一轮，不能再按旧文档说“初始化阶段必失败”。
 
-- `go2_asset.py:27-33` 中 `__init__()` 先调用 `_parse_cfg()`，之后才创建 `self.entity` 和 `self.sensor_mgr`。
-- `_parse_cfg()` 内 `go2_asset.py:74` 访问 `self.robot_cfg`，但这个属性从未定义，应是 `self.cfg`。
-- `_parse_cfg()` 内 `go2_asset.py:88` 访问 `self.asset.entity.get_spec()`，但此时 `self.asset` 也不存在；`Go2Asset` 自己就是 asset 对象。
-- `go2_asset.py:95`、`:101` 又访问 `self.asset.cfg.asset...`，同样会失败。
+当前代码观察：
 
-也就是说：MJCF 资源够，但 Python 适配层当前不是可用状态。环境第一步创建 `Go2Asset(self.robot_cfg)` 时就会卡住，见 `him_go2_env.py:46-47`。
+- `go2_asset.py:30-34` 已经先创建 `self.entity` 和 `self.sensor_mgr`，再调用 `_parse_cfg()`。
+- `go2_asset.py:74` 已经使用 `self.cfg.init_state.default_joint_angles.keys()`，不再访问不存在的 `self.robot_cfg`。
+- `go2_asset.py:88` 已经使用 `self.entity.get_spec()`，不再访问不存在的 `self.asset.entity`。
+- `go2_asset.py:95`、`:101` 已经使用 `self.cfg.asset...`。
+- 只读 smoke：`Go2Asset(HimGo2RoughCfg())` 已能返回 XML path，`len(joint_names)=12`，并确认 `base_link in body_names`。
+
+剩余问题：
+
+- `go2_asset.py:247-257` 的 `get_termination_contact_sensor()` 仍是不完整占位；当前 `terminate_after_contacts_on=[]` 时未必触发，但接口不能算写好。
+- `joint_names` 当前直接沿用 `default_joint_angles` 的 dict 顺序，也就是 type-major 且腿顺序 `FL, RL, FR, RR`。这和 XML leg-major `FL, FR, RL, RR`、部署 YAML 的语义仍没有冻结成同一个 ABI。
 
 ### 5.3 动作和部署顺序风险
 
@@ -173,32 +178,37 @@ XML 中能看到：
 
 - `him_go2_config.py:61-75` 的 dict 顺序是先四个 hip，再四个 thigh，再四个 calf，而且腿顺序写成 `FL, RL, FR, RR`。
 - XML 自然层级是 leg-major：`FL`、`FR`、`RL`、`RR`，每条腿 hip/thigh/calf。
-- `deploy/deploy_mujoco/him_go2/policy/config.yaml:38-41` 注释为 `FL, RL, FR, RR` 的 leg-major，但数值和训练 config 也不完全一致。
-- 部署 YAML 里 `hip_scale=0.125`，训练 config 里 `action_scale=0.25` 且 `hip_reduction=1.0`。见 `config.yaml:24-25`、`him_go2_config.py:85-88`。
+- `deploy/deploy_mujoco/him_go2/policy/config.yaml:38-41` 注释为 `FL, RL, FR, RR` 的 leg-major；scale 已经能和训练侧对齐，但 default pose 顺序和 torque limit 仍要冻结。
+- 部署 YAML 里 `action_scale=0.25`、`hip_scale=0.125`，当前训练 config 里 `action_scale=0.25`、`hip_reduction=0.5`，所以 hip 目标幅度已经能推到同一个 `0.125`；这一项不再作为 mismatch。
 - 部署 YAML 小腿 torque limit 是 `35.55`，训练 config 小腿是 `45`。见 `config.yaml:31-34`、`him_go2_config.py:83`。
 
 这是 sim2real 前的 P0 风险。训练、仿真部署、真机部署必须共享同一份 action order、default pose、scale、torque limit 契约，否则策略输出会控制错关节或以错误幅度控制。
 
 ## 6. Env 审计
 
-### 6.1 语法和构造硬阻塞
+### 6.1 当前导入已通过，但构造仍阻塞
 
-当前 `him_go2_env.py` 在 Python 3.11 下有语法级问题：
+这部分已经改过一轮：
 
-- `him_go2_env.py:663`
-- `him_go2_env.py:676`
+- `him_go2_env.py:663` 和 `:676` 的 command assert 已经改成普通字符串，Python 3.11 AST 检查通过。
+- `import legged_mjlab.envs.him_go2.him_go2_env` 已通过。
+- `_build_scene()` 调 `_build_sensors()` 时已经传入 `entity_name`，见 `him_go2_env.py:108-112`。
 
-这两处 f-string 使用了 Python 3.12 才更宽松的写法；项目 `.venv` 是 Python 3.11，因此不能导入该文件。
+当前第一个动态失败点是 `task_registry.make_env("him_go2", device="cpu", num_envs=1)`：
 
-即使语法修复后，还有连续构造问题：
+```text
+TypeError: HimGo2Env.__init__() got an unexpected keyword argument 'device'
+```
+
+仍然需要修的构造问题：
 
 | 问题 | 证据 | 影响 |
 |---|---|---|
 | `TaskRegistry.make_env()` 传 `device=`，但 `HimGo2Env.__init__()` 参数是 `sim_device, render_mode`。 | `task_registry.py:208`、`him_go2_env.py:39` | 训练入口 `train.py:53-58` 创建 env 会失败。 |
-| `_build_scene()` 调 `_build_sensors(debug_vis=...)`，但 `_build_sensors()` 需要 `entity_name`。 | `him_go2_env.py:111-117` | scene 构建失败。 |
-| `_build_observations()` 中 `entity_name = self.cfg.asset.name`，但此时还没 `super().__init__()`，`self.cfg` 不可靠；应使用 `self.robot_cfg` 语义。 | `him_go2_env.py:46-58`、`:476-480` | observation cfg 构建阶段失败或读错对象。 |
 | `_DEFAULT_ASSET_CFG = SceneEntityCfg("robot")`，但 scene entity 注册名是 `"go2"`。 | `him_go2_env.py:35`、`:103-110` | reward 默认查 `env.scene["robot"]`，实际没有。 |
 | critic sensor name 使用 `"robot/imu_lin_vel"` 和 `"terrain_scan"`，但 asset entity 是 `go2`，height sensor name 是 `"height_scan"`。 | `him_go2_env.py:563-569`、`go2_asset.py:264-265` | critic obs 组装会找不到传感器。 |
+
+已修好的旧项：`_build_observations()` 中的 `entity_name` 现在来自 `self.robot_cfg.asset.name`，不再在 `super().__init__()` 前访问 `self.cfg.asset.name`。
 
 ### 6.2 Reset 当前不是“贴地随机倒姿起身”
 
@@ -453,17 +463,20 @@ bounded linear weight_i proportional to 0.20 + (1 - success_rate_i)
 
 这一节回答你强调的三个问题：**具体哪里错、为什么错、改完应该长什么样**。这里的代码都是“建议补丁片段”，本次没有写入源码；真正改代码时建议按 P0 到 P3 分批提交，每批只跑对应 smoke。
 
-### 9.1 P0 硬阻塞：先让 env 能 import 和构造
+### 9.1 P0 当前硬阻塞：env 已能 import，但还不能 make_env
 
 | 位置 | 错在哪 | 为什么错 | 推荐改法 |
 |---|---|---|---|
 | `him_go2_env.py:35` | `_DEFAULT_ASSET_CFG = SceneEntityCfg("robot")` | 当前 scene 里实体名来自 `cfg.asset.name`，配置是 `"go2"`；reward/obs 默认会去找不存在的 `env.scene["robot"]`。 | 改成 `SceneEntityCfg("go2")`，或者所有 term 都显式传 `asset_cfg=SceneEntityCfg(entity_name, ...)`。 |
 | `him_go2_env.py:39-60` | `__init__()` 参数是 `sim_device, render_mode`，但 registry 传 `device=` 和 `play=`。 | `TaskRegistry.make_env()` 会用关键字 `device`，当前签名不接这个名字，训练入口创建 env 会失败。 | 用 `device: str`，`render_mode` 给默认值，并把 `device` 传给 `super()`。 |
 | `him_go2_env.py:8-9` | 两次把不同模块命名为 `mdp`。 | `mjlab.tasks.velocity.mdp` 在本地会 re-export `mjlab.envs.mdp`，短期不一定炸，但可读性和后续迁移很差，容易把 velocity command 与通用 mdp API 混在一起。 | 建议别用同名 alias：通用 MDP 用 `env_mdp`，velocity command 单独 import。 |
-| `him_go2_env.py:111-117` | `_build_scene()` 调 `_build_sensors(debug_vis=...)`，漏传 `entity_name`。 | `_build_sensors(self, entity_name, debug_vis)` 需要实体名生成 contact/raycast sensor。 | `self._build_sensors(entity_name=entity_name, debug_vis=debug_vis)`。 |
-| `him_go2_env.py:663`、`:676` | f-string 写成 `f"Command '{"twist"}' not found."`。 | Python 3.11 下这是语法错误；当前 `.venv` 是 Python 3.11。 | 改成普通字符串 `"Command 'twist' not found."`。 |
 
-对应的修改后代码片段建议是：
+已不再列为 P0 blocker 的旧项：
+
+- `him_go2_env.py:663`、`:676` 的 f-string assert 已修好，AST 检查通过。
+- `_build_scene()` 调 `_build_sensors()` 已传 `entity_name`，见当前 `him_go2_env.py:108-112`。
+
+当前构造签名应改成：
 
 ```python
 import torch
@@ -507,47 +520,24 @@ class HimGo2Env(ManagerBasedRlEnv):
         )
 ```
 
-`_build_scene()` 对应改成：
-
-```python
-def _build_scene(self, asset, play, debug_vis: bool = False):
-    entity_name = self.robot_cfg.asset.name
-    return SceneCfg(
-        num_envs=self.robot_cfg.env.num_envs,
-        env_spacing=self.robot_cfg.env.env_spacing,
-        terrain=self._build_terrain(),
-        entities={
-            entity_name: self.asset.entity.get_robot_cfg(),
-        },
-        sensors=tuple(
-            self._build_sensors(
-                entity_name=entity_name,
-                debug_vis=debug_vis,
-            )
-        ),
-        extent=self.robot_cfg.env.extent,
-    )
-```
-
-两个 reward 里的 command assert 改成：
-
-```python
-command = env.command_manager.get_command("twist")
-assert command is not None, "Command 'twist' not found."
-```
-
 注意：如果你采用 `env_mdp` alias，所有通用函数也要同步改名，例如 `env_mdp.reset_root_state_uniform`、`env_mdp.joint_pos_rel`、`env_mdp.height_scan`。不要只改 import，不改调用。
 
-### 9.2 `Go2Asset` 初始化顺序和 mjlab 1.6 sensor 字段
+### 9.2 `Go2Asset` 当前只剩 ABI 和占位接口风险
 
-| 位置 | 错在哪 | 为什么错 | 推荐改法 |
-|---|---|---|---|
-| `go2_asset.py:28-33` | 先 `_parse_cfg()`，再创建 `self.entity`。 | `_parse_cfg()` 内要解析 MJCF spec，当前又写成 `self.asset.entity.get_spec()`，对象还没创建。 | 先建 `self.entity` / `self.sensor_mgr`，再 parse。 |
-| `go2_asset.py:74` | 用 `self.robot_cfg`。 | `Go2Asset` 只有 `self.cfg`，没有 `self.robot_cfg`。 | 改成 `self.cfg`，或显式冻结 `GO2_POLICY_JOINT_ORDER`。 |
-| `go2_asset.py:88`、`:95`、`:101` | 用 `self.asset...`。 | 在 `Go2Asset` 自身方法里没有 `self.asset`。 | 改成 `self.entity.get_spec()` 和 `self.cfg.asset...`。 |
-| `go2_asset.py:245` | `ContactSensorCfg(..., exclude_parent_body=True)`。 | 本地 mjlab 1.6.0 的 `ContactSensorCfg` 有 `history_length`，但没有 `exclude_parent_body`。 | 删除该参数；如果确实要排除父子自碰，需要换 contact match 设计或在 reward 侧过滤。 |
-| `go2_asset.py:281` | `RayCastSensorCfg(..., history_length=...)`。 | 本地 mjlab 1.6.0 的 `RayCastSensorCfg` 有 `exclude_parent_body`，但没有 `history_length`。 | 删除 `history_length`；height scan 不按 contact sensor 的 history 方式配置。 |
-| `go2_asset.py:284-290` | `get_all_sensors()` 调 sensor 函数时没传 `entity_name`。 | 这些函数签名都需要实体名。虽然当前 env 没走这个函数，但后续调用会失败。 | 给 `get_all_sensors(entity_name, debug_vis=False)`。 |
+已不再列为 blocker 的旧项：
+
+- `Go2Asset.__init__()` 初始化顺序已经调整，`self.entity` / `self.sensor_mgr` 在 `_parse_cfg()` 前创建。
+- `_parse_cfg()` 中的 `self.robot_cfg`、`self.asset.entity`、`self.asset.cfg` 旧引用已经改成 `self.cfg` / `self.entity`。
+- `ContactSensorCfg` 上的 `exclude_parent_body=True` 已删除。
+- `RayCastSensorCfg` 上的 `history_length` 已删除，并保留了 raycast 合理的 `exclude_parent_body=True`。
+- `get_all_sensors()` 已接收并传递 `entity_name`。
+
+当前仍需要处理的是：
+
+| 位置 | 问题 | 为什么还要修 |
+|---|---|---|
+| `go2_asset.py:247-257` | `get_termination_contact_sensor()` 仍是不完整占位，`name=""`，`ContactMatch()` 空参数。 | 当前 `terminate_after_contacts_on=[]` 时可能不走到，但一旦启用 termination contact，这个接口会失败。 |
+| `go2_asset.py:74` | `joint_names` 直接沿用 `default_joint_angles` dict 顺序。 | 这个顺序是 type-major / `FL, RL, FR, RR` 混排，和 XML leg-major、部署 YAML 之间仍未冻结 ABI。 |
 
 建议先在 `Go2Asset` 里冻结策略关节顺序。首版新训练推荐用 XML leg-major 顺序 `FL, FR, RL, RR`，每条腿 `hip, thigh, calf`。如果你要兼容已有部署 YAML 或旧 checkpoint，需要在 ABI 文档里明确另一套顺序并做 name-based remap，不能靠 dict 顺序。
 
@@ -566,148 +556,23 @@ GO2_POLICY_JOINT_ORDER = (
     "RR_thigh_joint",
     "RR_calf_joint",
 )
-
-
-class Go2Asset:
-    def __init__(self, cfg: HimGo2RoughCfg):
-        self.cfg = cfg
-        self.entity = self.entitycfg(self)
-        self.sensor_mgr = self.sensor(self)
-        self._parse_cfg()
-
-    def _parse_cfg(self):
-        raw_file = getattr(self.cfg.asset, "file", "")
-        self.xml_path: Path = self._resolve_xml_path(raw_file)
-
-        self.effort_limit = self.cfg.control.effort_limit
-        self.stiffness = self.cfg.control.stiffness
-        self.damping = self.cfg.control.damping
-        self.armature = self.cfg.asset.armature
-
-        self.pos = self.cfg.init_state.pos
-        self.rot = self.cfg.init_state.rot
-        self.default_joint_angles = self.cfg.init_state.default_joint_angles
-
-        self.vel_limit = self.cfg.rewards.soft_dof_vel_limit
-        self.pos_limit = self.cfg.rewards.soft_dof_pos_limit
-
-        missing = set(GO2_POLICY_JOINT_ORDER) - set(self.default_joint_angles)
-        if missing:
-            raise ValueError(f"default_joint_angles 缺少关节: {sorted(missing)}")
-        self.joint_names = GO2_POLICY_JOINT_ORDER
-
-        if self.cfg.domain_rand.randomize_cmd_action_latency:
-            self.action_delay = self.cfg.domain_rand.range_cmd_action_latency
-            self.action_delay_min = self.action_delay[0]
-            self.action_delay_max = self.action_delay[1]
-            self.action_hold_prob = self.cfg.domain_rand.action_hold_prob
-        else:
-            self.action_delay = 0
-            self.action_delay_min = 0
-            self.action_delay_max = 0
-            self.action_hold_prob = 0
-
-        spec = self.entity.get_spec()
-        self.body_names = tuple(
-            body.name for body in spec.worldbody.find_all("body")
-        )
-
-        self.penalized_contact_names = []
-        for name in self.cfg.asset.penalize_contacts_on:
-            self.penalized_contact_names.extend(
-                body for body in self.body_names if name in body
-            )
-
-        self.termination_contact_names = []
-        for name in self.cfg.asset.terminate_after_contacts_on:
-            self.termination_contact_names.extend(
-                body for body in self.body_names if name in body
-            )
-
-        self.penalized_contact_names = tuple(dict.fromkeys(self.penalized_contact_names))
-        self.termination_contact_names = tuple(dict.fromkeys(self.termination_contact_names))
-```
-
-sensor 部分建议这样修：
-
-```python
-def get_illegal_contact_sensor(self, entity_name: str) -> ContactSensorCfg:
-    return ContactSensorCfg(
-        name="nonfoot_ground_touch",
-        primary=ContactMatch(
-            mode="body",
-            pattern=tuple(self.asset.penalized_contact_names),
-            entity=entity_name,
-        ),
-        secondary=ContactMatch(
-            mode="body",
-            pattern="terrain",
-        ),
-        fields=("found", "force"),
-        reduce="maxforce",
-        num_slots=1,
-        history_length=self.asset.cfg.control.decimation,
-    )
-
-
-def get_height_scan_sensor(
-    self,
-    entity_name: str,
-    debug_vis: bool = False,
-) -> RayCastSensorCfg:
-    x_points = tuple(self.asset.cfg.terrain.measured_points_x)
-    y_points = tuple(self.asset.cfg.terrain.measured_points_y)
-    return RayCastSensorCfg(
-        name="height_scan",
-        frame=ObjRef(
-            type="body",
-            name="base_link",
-            entity=entity_name,
-        ),
-        pattern=GridPatternCfg(
-            size=(
-                max(x_points) - min(x_points),
-                max(y_points) - min(y_points),
-            ),
-            resolution=self.asset.cfg.terrain.horizontal_scale,
-        ),
-        ray_alignment="yaw",
-        max_distance=5.0,
-        exclude_parent_body=True,
-        debug_vis=bool(debug_vis),
-    )
-
-
-def get_all_sensors(
-    self,
-    entity_name: str,
-    debug_vis: bool = False,
-) -> Dict[str, Any]:
-    sensors = {
-        "feet_ground_contact": self.get_foot_contact_sensor(entity_name),
-        "illegal_contact": self.get_illegal_contact_sensor(entity_name),
-    }
-    if getattr(self.asset.cfg.terrain, "measure_heights", False):
-        sensors["height_scan"] = self.get_height_scan_sensor(
-            entity_name,
-            debug_vis=debug_vis,
-        )
-    return sensors
 ```
 
 ### 9.3 Action、command、observation 的 ABI 修法
 
 | 位置 | 错在哪 | 为什么错 | 推荐改法 |
 |---|---|---|---|
-| `him_go2_env.py:207` | env 读 `hip_scale_reduction`。 | config 里字段是 `hip_reduction`。 | 统一成 `hip_reduction`。 |
-| `him_go2_env.py:211` | env 读 `control.action_clip`。 | config 没有这个字段；已有 `normalization.clip_actions`。 | 用 `normalization.clip_actions`，或者在 config 新增字段并全链路使用。 |
-| `him_go2_env.py:220` | `JointPositionActionCfg` 参数写 `actuator_name`。 | mjlab 1.6.0 的字段是 `actuator_names`。 | 改成 `actuator_names=self.asset.joint_names`。 |
-| `him_go2_env.py:224` | `clip` 给 tuple，且容易被误解为 raw action 的 `[-1,1]` 限幅。 | mjlab 1.6.0 的 `JointPositionAction` 先算 `raw * scale + q0`，再对 processed target 做 `clip`；它不是 policy raw action 安全门。 | raw action 需要在 wrapper/runner 边界做 finite + clamp；env action term 的 `clip` 应表达每关节目标位置安全范围。 |
-| `him_go2_env.py:462` | `tuple(self.robot_cfg.commands.resampling_time)`。 | `resampling_time` 是 float，`tuple(10.0)` 会 TypeError。 | 标量转成 `(period, period)`。 |
-| `him_go2_env.py:471` | `heading_command=False` 但仍传 `heading=tuple(ranges.heading)`。 | `UniformVelocityCommand` 初始化时会拒绝 `heading_command=False` 且 `ranges.heading` 非空。 | `heading = None if not heading_command else tuple(ranges.heading)`。 |
-| `him_go2_env.py:480` | observation 构建阶段读 `self.cfg.asset.name`。 | `self.cfg` 是 `ManagerBasedRlEnv` 初始化后才更可靠；构建 cfg 阶段应读 `self.robot_cfg`。 | 改成 `self.robot_cfg.asset.name`。 |
+| `him_go2_env.py:211-224` | 字段名已经改成 `hip_reduction`、`normalization.clip_actions` 和 `actuator_names`，但 `clip` 仍给 tuple，且容易被误解为 raw action 的 `[-1,1]` 限幅。 | mjlab 1.6.0 的 `JointPositionAction` 先算 `raw * scale + q0`，再对 processed target 做 `clip`；它不是 policy raw action 安全门。`JointPositionActionCfg.clip` 也会走 name resolver，建议使用按关节名匹配的 dict。 | raw action 需要在 wrapper/runner 边界做 finite + clamp；env action term 的 `clip` 应表达每关节目标位置安全范围。 |
+| `him_go2_env.py:471` | `heading_command=False` 但仍传 `heading=tuple(ranges.heading)`。 | 本地 mjlab 1.6.0 `UniformVelocityCommand.__init__()` 会拒绝 `ranges.heading` 非空且 `heading_command=False` 的组合。 | `heading = None if not heading_command else tuple(ranges.heading)`。 |
 | `him_go2_env.py:527`、`:534`、`:542` | `projected_gravity/joint_pos_rel/joint_vel_rel` 没传 `asset_cfg`。 | 这些 mjlab 默认 `SceneEntityCfg("robot")`，当前实体是 `go2`。 | 显式传 `SceneEntityCfg(entity_name, ...)`。 |
 | `him_go2_env.py:565`、`:569` | critic sensor name 是 `"robot/imu_lin_vel"` 和 `"terrain_scan"`。 | 当前 builtin sensor 应跟实体名走，height scan 名是 `"height_scan"`。 | 改成 `f"{entity_name}/imu_lin_vel"` 和 `"height_scan"`。 |
+
+已修好但仍建议保留一次 smoke 核验的点：
+
+- `hip_reduction` 字段名已经对齐 config。
+- `clip_actions` 当前来自 `normalization.clip_actions`，不再访问不存在的 `control.action_clip`。
+- `JointPositionActionCfg` 已使用 `actuator_names`，不再是 `actuator_name`。
+- observation 构建阶段已经使用 `self.robot_cfg.asset.name`，不再在 `super().__init__()` 前访问 `self.cfg.asset.name`。
 
 Action 修改后片段：
 
@@ -1330,7 +1195,7 @@ observation_abi:
     order: [actor_frame_45, base_lin_vel_3]
 ```
 
-这里故意把 `hip` scale 写成 `0.125`，不是沿用当前训练 config 的 `action_scale=0.25, hip_reduction=1.0`。原因是部署 YAML 当前写的是 `hip_scale=0.125`，而 Go2 髋关节横摆通常对幅度更敏感。你也可以选择训练继续用 hip 0.25，但那必须同步改部署配置和安全限幅，不能训练/部署两边不一致。
+这里把 `hip` scale 写成 `0.125`，与当前训练 config 的 `action_scale=0.25, hip_reduction=0.5` 和部署 YAML 的 `hip_scale=0.125` 一致。这一项当前已经对齐，不再作为 blocker；后续真正要冻结的是关节顺序、target clip、raw action gate 和 torque limit 的一致性。
 
 如果你已有 checkpoint 或部署代码明确依赖 `FL, RL, FR, RR` 顺序，那就不要直接采用上面的顺序；应把 ABI version 改成 `go2-him-legacy-deploy-order`，并写显式 remap。关键不是哪个顺序“天然正确”，而是全链路只能有一个真实顺序。
 
@@ -1380,10 +1245,10 @@ pytest、`make_env/reset/step` 和训练 smoke 都属于写入型或有运行副
 
 | 验证 | 当前状态 | 写入范围 | PASS 条件 |
 |---|---|---|---|
-| AST only | `FAIL`，当前停在 `him_go2_env.py:663` | 无项目写入 | Python 3.11 AST 通过。 |
+| AST only | `PASS`，当前 `him_go2_env.py` 可被 Python 3.11 AST 解析 | 无项目写入 | Python 3.11 AST 通过。 |
 | backend source gate | `NOT_RUN` | import 级副作用风险，禁 pycache | `rsl_rl.__file__` 和 `HIMOnPolicyRunner.__module__` 均指向项目内旧版实现。 |
 | pytest contract | `NOT_RUN`，`.venv` 无 pytest，建议测试文件尚未创建 | 测试 cache/临时文件；需抑制 cache 或写 `/tmp` | `legged_mjlab/test/test_him_go2_contracts.py` 创建后通过。 |
-| env smoke | `REQUIRES_WRITE_SCOPE` | MuJoCo/mjlab 进程状态，可能写临时资源 | `make_env -> reset -> step` 形状和 finite 检查通过。 |
+| env smoke | `FAIL/BLOCKED`，当前首个失败是 `HimGo2Env.__init__()` 不接 `device=` | MuJoCo/mjlab 进程状态，可能写临时资源 | `make_env -> reset -> step` 形状和 finite 检查通过。 |
 | training smoke | `REQUIRES_WRITE_SCOPE` | 必须显式 `--log-dir /tmp/legged_mjlab_smoke` | `num_envs=1, max_iterations=1` 只验证 runner ABI，不评价性能。 |
 
 建议测试内容至少覆盖：
@@ -1439,12 +1304,12 @@ def test_recovery_reset_has_no_initial_spike(env):
 
 必须修：
 
-1. Python 3.11 f-string 语法。
-2. `TaskRegistry.make_env()` 与 `HimGo2Env.__init__()` 参数对齐。
-3. `Go2Asset` 中 `self.robot_cfg` / `self.asset` 未定义的问题。
-4. `_build_sensors()` 调用参数。
-5. `self.cfg` 和 `self.robot_cfg` 的使用边界。
-6. `hip_reduction`、`action_clip`、`randomize_friction` 等字段名。
+1. `TaskRegistry.make_env()` 与 `HimGo2Env.__init__()` 参数对齐：registry 传 `device=`，当前 env 只接 `sim_device`。
+2. `_DEFAULT_ASSET_CFG = SceneEntityCfg("robot")` 改成 `go2` 或按 reward term 显式传 `SceneEntityCfg(entity_name)`。
+3. action `clip` 从 tuple 改成按关节名匹配的 target clip dict；raw action finite/clamp 另放在 wrapper/runner 边界。
+4. `heading_command=False` 时把 `ranges.heading` 传成 `None`。
+5. observation 中 `projected_gravity/joint_pos_rel/joint_vel_rel` 显式传 `asset_cfg=SceneEntityCfg("go2", ...)`，critic sensor name 改成当前 sensor 名。
+6. event 中 `frandomize_friction` 改成 `randomize_friction`；`push_robot` interval event 补 `interval_range_s` 和需要的 `asset_cfg`。
 7. reward 名称与函数闭合，所有非零 scale 都必须有对应 callable。
 
 完成标准：
@@ -1540,7 +1405,7 @@ def test_recovery_reset_has_no_initial_spike(env):
 
 | 阶段 | 前置条件 | 写入范围 | 当前状态 |
 |---|---|---|---|
-| P0 import/construct | Python 3.11 AST 修复、`Go2Asset` 构造修复 | 源码修改后才可跑动态 smoke | `FAIL`，当前 env 语法仍阻塞。 |
+| P0 import/construct | env 构造签名、asset cfg、action/command/obs/event/reward contract 修复 | 源码修改后才可跑完整动态 smoke | `FAIL`，AST/import/`Go2Asset` 已过；当前 `make_env` 首个失败是 `HimGo2Env.__init__()` 不接 `device=`。 |
 | P1 ABI | P0 通过；action/obs/critic/order 文档冻结 | 可能修改 config/wrapper/runner/deploy 文档 | `NOT_RUN`，backend source gate 尚未跑。 |
 | P2 recovery reset | P1 通过；plane + low DR recovery cfg | 需要运行 MuJoCo reset/forward/step | `REQUIRES_WRITE_SCOPE`。 |
 | P3 recovery reward | P2 reset 通过；状态机单点更新 | 需要 reward logs 和短训练日志 | `REQUIRES_WRITE_SCOPE`。 |
@@ -1554,17 +1419,18 @@ def test_recovery_reset_has_no_initial_spike(env):
 
 | 检查 | 状态 | 说明 |
 |---|---|---|
-| Python AST | 失败 | `.venv/bin/python -B -c 'import ast,pathlib; ast.parse(pathlib.Path("legged_mjlab/envs/him_go2/him_go2_env.py").read_text())'` 会在 `him_go2_env.py:663` 报 `f-string: expecting '}'`；`:676` 有同类写法。 |
-| env import | 阻塞 | `import legged_mjlab.envs.him_go2.him_go2_env` 受同一语法错误阻塞，`import legged_mjlab.envs` 也会失败。 |
-| 原始 XML asset | 通过轻量验证 | `mujoco.MjModel.from_xml_path("resources/robots/unitree_go2/xmls/go2.xml")` 可解析，模型约为 `nq=19, nv=18, nu=0, nbody=14`；这只证明 XML/mesh 可用，不证明 `Go2Asset` 封装可用。 |
-| `Go2Asset` 构造 | 不可验证 | 先被 env 语法导入阻塞；修复语法后仍会遇到 `go2_asset.py:74` 的 `self.robot_cfg` 未定义等问题。 |
+| Python AST | `PASS` | `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B -c 'import ast,pathlib; ast.parse(pathlib.Path("legged_mjlab/envs/him_go2/him_go2_env.py").read_text()); print("ast-ok")'` 返回 `ast-ok`。 |
+| env import | `PASS` | `PYTHONDONTWRITEBYTECODE=1 MPLCONFIGDIR=/tmp/matplotlib-leg-mjlab .venv/bin/python -B -c 'import importlib; importlib.import_module("legged_mjlab.envs.him_go2.him_go2_env"); print("import-ok")'` 返回 `import-ok`。 |
+| 原始 XML asset | 通过轻量验证 | `mujoco.MjModel.from_xml_path("resources/robots/unitree_go2/xmls/go2.xml")` 可解析，模型约为 `nq=19, nv=18, nu=0, nbody=14`；这只证明 XML/mesh 可用，不证明训练 ABI 已闭合。 |
+| `Go2Asset` 构造 | `PASS` | `Go2Asset(HimGo2RoughCfg())` 已能返回 XML path，`len(joint_names)=12`，并确认 `base_link in body_names`。 |
+| `task_registry.make_env("him_go2")` | `FAIL` | 当前首个动态阻塞为 `TypeError: HimGo2Env.__init__() got an unexpected keyword argument 'device'`。reset/step/reward smoke 因此未继续。 |
 | HIM backend source | 未运行 | 必须调用 `load_project_rsl()` 后检查 `rsl_rl.__file__`、`runners.__file__`、`HIMOnPolicyRunner.__module__`；裸 `import rsl_rl` 不能证明训练时使用项目内旧版 runner。 |
 | wrapper pytest | `NOT_RUN` | `.venv` 有 `torch==2.13.0` 但没有 `pytest`；系统 Python 有 pytest 但没有 torch。建议的新测试文件还没有创建；现有相关测试位于 `legged_mjlab/test/test_him_wrapper_terminal_privileged.py`，本次未运行。 |
 | 训练 smoke | 未运行 | `train.py:62` 会创建日志目录，`:70` 会启动训练；本次文档-only 范围内不执行。 |
 
 严格只读优先级：
 
-1. AST only：对 `legged_mjlab/envs/him_go2/him_go2_env.py` 做 Python 3.11 AST 检查，不用 `py_compile/compileall`。
+1. AST only：已通过；后续每次改 env 后仍建议复跑，不用 `py_compile/compileall`。
 2. backend source gate：用 `PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -B` 调 `load_project_rsl()`，打印并断言项目内旧版 `rsl_rl` 来源。
 3. 文件存在性检查：确认建议测试文件尚未创建时标 `NOT_RUN`，不要把模板命令写成当前可执行结果。
 
@@ -1583,13 +1449,12 @@ def test_recovery_reset_has_no_initial_spike(env):
 
 P0 blocker：
 
-- `him_go2_env.py` Python 3.11 语法。
-- `Go2Asset` 初始化引用未定义属性。
 - `TaskRegistry.make_env()` 和 `HimGo2Env.__init__()` 参数不匹配。
-- `_build_sensors()` 缺 `entity_name`。
-- action cfg 字段名和 config 不匹配。
-- command resampling time 类型不匹配。
-- observation sensor name 不匹配。
+- `_DEFAULT_ASSET_CFG("robot")` 与当前实体 `go2` 不匹配。
+- action `clip` 类型/语义还没有从 raw action gate 中分离。
+- `heading_command=False` 时仍传非空 `ranges.heading`。
+- observation term 缺显式 `asset_cfg`，critic sensor name 不匹配。
+- `push_robot` interval event 缺 interval/asset 参数，摩擦随机化字段名仍是 `frandomize_friction`。
 - reward 名称和函数不闭合。
 
 P1 blocker：
@@ -1610,7 +1475,7 @@ P2 recovery blocker：
 
 P3 sim2real blocker：
 
-- 训练和部署 action scale、hip scale、torque limit 不一致。
+- 训练和部署的 action scale/hip scale 当前已对齐到 `0.25/0.125`，但关节顺序和 torque limit 仍不一致。
 - deploy 目录目前更像 sim2sim 配置，没有完整策略调用、关节重排、安全限幅、watchdog、通信桥接。
 - 本文第 9.8 只能作为仿真策略 ABI；缺少真实硬件 motor id、方向符号、零位、位置/速度/增量/力矩限幅、模式切换、CRC、传感器新鲜度、急停和 fail-closed 契约。
 
@@ -1631,7 +1496,7 @@ P3 sim2real blocker：
 
 ## 14. 并发审查结果与已吸收修改
 
-本轮按三个分支做了只读审查，审查本身没有修改代码：
+前一轮按三个分支做了只读审查，审查本身没有修改代码：
 
 | 分支 | 结果 | 已写回本文档的修改 |
 |---|---|---|
@@ -1639,10 +1504,21 @@ P3 sim2real blocker：
 | `math_verifier` | `REJECT` | 修正 `stand_height` 指数尺度；把 45D 固定高度与 46D/47D 动态高度 ABI 写成互斥；把 success latch 从 reward 函数移到单点状态更新；补 `recent_max_agitation` 衰减峰值状态机；统一 bucket curriculum 为有界线性权重。 |
 | `devops_build_engineer` | `BLOCKER/NOT_RUN` | 将验证拆成严格只读和获准写入后两类；补 `load_project_rsl()` backend source gate；标明 `.venv` 无 pytest、建议测试文件未创建；训练 smoke 必须显式写 `/tmp` 日志目录。 |
 
+本轮用户已经改过一部分源码，本文档已删除不再成立的 blocker。当前新增的只读/轻量动态确认是：
+
+| 检查 | 当前结果 | 文档处理 |
+|---|---|---|
+| `him_go2_env.py` AST | `PASS` | 不再把 Python 3.11 f-string 作为 P0 blocker。 |
+| `him_go2_env` import | `PASS` | 不再写成 env import blocked。 |
+| `Go2Asset(HimGo2RoughCfg())` | `PASS` | 不再写成 asset 初始化必失败；只保留 termination sensor 占位和 action order 未冻结。 |
+| `_build_sensors(entity_name=...)` | 已修 | 不再列为 P0 blocker。 |
+| reward command assert | 已修 | 不再列为 reward blocker。 |
+| `task_registry.make_env("him_go2")` | `FAIL` | 当前首个失败收敛为 `HimGo2Env.__init__()` 不接 `device=`。 |
+
 仍然不能声明 `ALL_TESTS_PASSED`，原因是：
 
-- 没有修改源码，所以 `him_go2_env.py:663` 的 Python 3.11 语法错误仍在。
-- 没有运行 `Go2Asset` 构造、`make_env`、reset、step、reward smoke、pytest 或训练。
+- 本次仍只修改文档，没有直接写入源码。
+- `make_env` 还失败，reset、step、reward smoke、pytest 和训练均未跑通。
 - 真机相关内容仍缺硬件安全契约、逐关节实测映射和 watchdog/急停/断连策略。
 
 因此本文档的定位是“迁移和修复指南”，不是已通过实现或发布说明。
