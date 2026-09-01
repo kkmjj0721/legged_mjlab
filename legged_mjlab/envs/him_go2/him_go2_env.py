@@ -32,7 +32,7 @@ from legged_mjlab.envs.him_go2.him_go2_config import HimGo2RoughCfg
 
 from legged_mjlab.utils.helpers import class_to_dict
 
-_DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
+_DEFAULT_ASSET_CFG = SceneEntityCfg(HimGo2RoughCfg.asset.name)
 
 
 class HimGo2Env(ManagerBasedRlEnv):
@@ -718,6 +718,14 @@ class HimGo2Env(ManagerBasedRlEnv):
             xy_squared = torch.sum(torch.square(asset.data.projected_gravity_b[:, :2]), dim=1)
         return xy_squared
 
+    def _reward_dof_acc(
+        self,
+        env: ManagerBasedRlEnv,
+        asset_cfg: SceneEntityCfg
+    ):
+        pass
+        
+
     def _reward_joint_power(
         self,
         env: ManagerBasedRlEnv, 
@@ -739,7 +747,7 @@ class HimGo2Env(ManagerBasedRlEnv):
         height = asset.data.root_link_pos_w[:, 2] - env.scene.env_origins[:, 2]
         return torch.square(height - self.robot_cfg.rewards.base_height_target)
 
-    def _reward_feet_clearance(
+    def _reward_foot_clearance(
         self,
         env: ManagerBasedRlEnv,
         command_threshold: float = 0.1,
@@ -865,7 +873,7 @@ class HimGo2Env(ManagerBasedRlEnv):
         violation = torch.relu(lower - joint_pos) + torch.relu(joint_pos - upper)
         return torch.sum(violation, dim=1)
 
-    def _reward_torque_limit(
+    def _reward_torque_limits(
         self,
         env: ManagerBasedRlEnv,
         soft_limit: float,
