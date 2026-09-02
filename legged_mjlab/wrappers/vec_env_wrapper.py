@@ -49,10 +49,6 @@ class VecEnvWrapper:
         return getattr(self.env, name)
 
     @property
-    def device(self):
-        return getattr(self.env, "device", None)
-
-    @property
     def num_envs(self):
         return self._num_envs
 
