@@ -125,3 +125,13 @@ uv pip tree
     本仓库已经提供根 `pyproject.toml`，不需要再次初始化项目。新项目才需要
     根据其自身元数据另行规划初始化流程。
 
+## 4\.设置源：
+
+```Bash
+    mkdir -p ~/.config/uv
+    cat <<EOF > ~/.config/uv/uv.toml
+    [[index]]
+    url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+    default = true
+    EOF
+```

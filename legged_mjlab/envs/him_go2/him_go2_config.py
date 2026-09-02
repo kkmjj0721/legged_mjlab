@@ -216,16 +216,15 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
 
 class HimGo2CfgPPO(LeggedMjlabCfgPPO):
     seed = 42
-    runner_class_name = "HIMOnPolicyRunner"
     
     class policy(LeggedMjlabCfgPPO.policy):
-        policy_class_name = "HIMActorCritic"
+        init_noise_std = 1.0
 
     class algorithm(LeggedMjlabCfgPPO.algorithm):
-        algorithm_class_name = "HIMPPO"
         entropy_coef = 0.01
 
     class runner(LeggedMjlabCfgPPO.runner):
+        class_name = "HIMOnPolicyRunner"
         policy_class_name = "HIMActorCritic"
         algorithm_class_name = "HIMPPO"
         num_steps_per_env = 100

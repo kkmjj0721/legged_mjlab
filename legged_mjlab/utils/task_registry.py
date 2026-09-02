@@ -61,7 +61,7 @@ class TaskRegistry():
             play=getattr(args, "play", False)
         )
         
-        runner_name = getattr(self.train_cfgs[name].runner, "runner_class_name", "OnPolicyRunner")
+        runner_name = getattr(self.train_cfgs[name].runner, "class_name", "OnPolicyRunner")
         if runner_name == "HIMOnPolicyRunner":
             env = HIMRslRlWrapper(
                 env,
@@ -92,8 +92,8 @@ class TaskRegistry():
         
         train_cfg_dict = class_to_dict(train_cfg)
 
-        runner_class_name = getattr(train_cfg.runner, "runner_class_name", "OnPolicyRunner")
-        if runner_class_name == "HIMOnPolicyRunner":
+        runner_name = getattr(self.train_cfgs[name].runner, "class_name", "OnPolicyRunner")
+        if runner_name == "HIMOnPolicyRunner":
             runner = HIMOnPolicyRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
         else:
             runner = OnPolicyRunner(env, train_cfg_dict, log_dir, device=args.rl_device)

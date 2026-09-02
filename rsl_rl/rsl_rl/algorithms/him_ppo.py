@@ -103,46 +103,9 @@ class HIMPPO:
         self.transition.next_critic_observations = next_critic_obs.clone()
         self.transition.rewards = rewards.clone()
         self.transition.dones = dones
-        # Bootstrapping is controlled only by the explicit wrapper contract.
-        # ``time_outs`` is intentionally ignored: without an explicit mask no
-        # transition may be bootstrapped.
-        bootstrap_mask = None
-        if infos is not None:
-            bootstrap_mask = infos.get('timeout_bootstrap')
-            if bootstrap_mask is None:
-                bootstrap_mask = infos.get('timeout_bootstrap_mask')
-
-        reward_batch = self.transition.rewards.reshape(-1)
-        if bootstrap_mask is None:
-            bootstrap_mask = torch.zeros(
-                reward_batch.shape, device=self.device, dtype=torch.bool
-            )
-        else:
-            bootstrap_mask = torch.as_tensor(
-                bootstrap_mask, device=self.device, dtype=torch.bool
-            ).reshape(-1)
-            if bootstrap_mask.numel() != reward_batch.numel():
-                raise ValueError(
-                    "timeout bootstrap mask does not match reward batch: "
-                    f"{bootstrap_mask.numel()} vs {reward_batch.numel()}"
-                )
-
-        if bool(bootstrap_mask.any().item()):
-            with torch.no_grad():
-                next_values = self.actor_critic.evaluate(next_critic_obs).detach()
-            next_values = next_values.reshape(-1)
-            if next_values.numel() != bootstrap_mask.numel():
-                raise ValueError(
-                    "next critic values do not match timeout bootstrap mask: "
-                    f"{next_values.numel()} vs {bootstrap_mask.numel()}"
-                )
-            bootstrap = next_values * bootstrap_mask.to(next_values.dtype)
-            if self.transition.rewards.ndim > 1:
-                bootstrap = bootstrap.reshape(
-                    self.transition.rewards.shape[0],
-                    *([1] * (self.transition.rewards.ndim - 1)),
-                )
-            self.transition.rewards += self.gamma * bootstrap
+        # Bootstrapping on time outs
+        if 'time_outs' in infos:
+            self.transition.rewards += self.gamma * torch.squeeze(self.transition.values * infos['time_outs'].unsqueeze(1).to(self.device), 1)
 
         # Record the transition
         self.storage.add_transitions(self.transition)
@@ -226,4 +189,4 @@ class HIMPPO:
         mean_swap_loss /= num_updates
         self.storage.clear()
 
-        return mean_value_loss, mean_surrogate_loss, mean_estimation_loss, mean_swap_loss
+        return mean_value_loss, mean_surrogate_loss, estimation_loss, swap_loss

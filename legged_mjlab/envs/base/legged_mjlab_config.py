@@ -226,10 +226,8 @@ class LeggedMjlabCfg(BaseConfig):
 
 class LeggedMjlabCfgPPO(BaseConfig):
     seed = 42
-    runner_class_name = "OnPolicyRunner"
 
     class policy:
-        policy_class_name = "ActorCritic"
         init_noise_std = 1.0
         actor_hidden_dims = [512, 256, 128]
         critic_hidden_dims = [512, 256, 128]
@@ -237,7 +235,6 @@ class LeggedMjlabCfgPPO(BaseConfig):
         obs_normalization = True
 
     class algorithm:
-        algorithm_class_name = "PPO"
         value_loss_coef = 1.0
         use_clipped_value_loss = True
         clip_param = 0.2
@@ -252,6 +249,7 @@ class LeggedMjlabCfgPPO(BaseConfig):
         max_grad_norm = 1.0
 
     class runner:
+        class_name = "OnPolicyRunner"
         policy_class_name = "ActorCritic"
         algorithm_class_name = "PPO"
         num_steps_per_env = 24

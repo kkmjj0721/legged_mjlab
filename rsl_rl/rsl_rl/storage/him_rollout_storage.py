@@ -29,6 +29,9 @@
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
 import torch
+import numpy as np
+
+from rsl_rl.utils import split_and_pad_trajectories
 
 class HIMRolloutStorage:
     class Transition:
@@ -51,79 +54,44 @@ class HIMRolloutStorage:
 
         self.device = device
 
-        self.obs_shape = self._shape_tuple(obs_shape)
-        self.privileged_obs_shape = self._shape_tuple(privileged_obs_shape)
-        self.actions_shape = self._shape_tuple(actions_shape)
+        self.obs_shape = obs_shape
+        self.privileged_obs_shape = privileged_obs_shape
+        self.actions_shape = actions_shape
 
         # Core
-        self.observations = torch.zeros(
-            num_transitions_per_env, num_envs, *self.obs_shape, device=self.device
-        )
-        if self.privileged_obs_shape is not None:
-            self.privileged_observations = torch.zeros(
-                num_transitions_per_env,
-                num_envs,
-                *self.privileged_obs_shape,
-                device=self.device,
-            )
-            self.next_privileged_observations = torch.zeros(
-                num_transitions_per_env,
-                num_envs,
-                *self.privileged_obs_shape,
-                device=self.device,
-            )
+        self.observations = torch.zeros(num_transitions_per_env, num_envs, *obs_shape, device=self.device)
+        if privileged_obs_shape[0] is not None:
+            self.privileged_observations = torch.zeros(num_transitions_per_env, num_envs, *privileged_obs_shape, device=self.device)
+            self.next_privileged_observations = torch.zeros(num_transitions_per_env, num_envs, *privileged_obs_shape, device=self.device)
         else:
             self.privileged_observations = None
             self.next_privileged_observations = None
         self.rewards = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
-        self.actions = torch.zeros(
-            num_transitions_per_env, num_envs, *self.actions_shape, device=self.device
-        )
-        self.dones = torch.zeros(
-            num_transitions_per_env, num_envs, 1, device=self.device, dtype=torch.bool
-        )
+        self.actions = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
+        self.dones = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device).byte()
 
         # For PPO
         self.actions_log_prob = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
         self.values = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
         self.returns = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
         self.advantages = torch.zeros(num_transitions_per_env, num_envs, 1, device=self.device)
-        self.mu = torch.zeros(
-            num_transitions_per_env, num_envs, *self.actions_shape, device=self.device
-        )
-        self.sigma = torch.zeros(
-            num_transitions_per_env, num_envs, *self.actions_shape, device=self.device
-        )
+        self.mu = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
+        self.sigma = torch.zeros(num_transitions_per_env, num_envs, *actions_shape, device=self.device)
 
         self.num_transitions_per_env = num_transitions_per_env
         self.num_envs = num_envs
 
         self.step = 0
 
-    @staticmethod
-    def _shape_tuple(shape):
-        if shape is None:
-            return None
-        if isinstance(shape, int):
-            return (shape,)
-        shape = tuple(shape)
-        if not shape or any(dim is None for dim in shape):
-            return None
-        return shape
-
     def add_transitions(self, transition: Transition):
         if self.step >= self.num_transitions_per_env:
             raise AssertionError("Rollout buffer overflow")
         self.observations[self.step].copy_(transition.observations)
-        if self.privileged_observations is not None:
-            self.privileged_observations[self.step].copy_(transition.critic_observations)
-        if self.next_privileged_observations is not None:
-            self.next_privileged_observations[self.step].copy_(
-                transition.next_critic_observations
-            )
+        if self.privileged_observations is not None: self.privileged_observations[self.step].copy_(transition.critic_observations)
+        if self.next_privileged_observations is not None: self.next_privileged_observations[self.step].copy_(transition.next_critic_observations)
         self.actions[self.step].copy_(transition.actions)
         self.rewards[self.step].copy_(transition.rewards.view(-1, 1))
-        self.dones[self.step].copy_(transition.dones.view(-1, 1).bool())
+        self.dones[self.step].copy_(transition.dones.view(-1, 1))
         self.values[self.step].copy_(transition.values)
         self.actions_log_prob[self.step].copy_(transition.actions_log_prob.view(-1, 1))
         self.mu[self.step].copy_(transition.action_mean)
@@ -147,15 +115,11 @@ class HIMRolloutStorage:
 
         # Compute and normalize the advantages
         self.advantages = self.returns - self.values
-        # unbiased=True returns NaN for a one-element rollout.  The population
-        # standard deviation is the correct normalization for this batch and
-        # remains finite for both singleton and ordinary rollouts.
-        advantage_std = self.advantages.std(unbiased=False)
-        self.advantages = (self.advantages - self.advantages.mean()) / (advantage_std + 1e-8)
+        self.advantages = (self.advantages - self.advantages.mean()) / (self.advantages.std() + 1e-8)
 
     def get_statistics(self):
         done = self.dones
-        done[-1] = True
+        done[-1] = 1
         flat_dones = done.permute(1, 0, 2).reshape(-1, 1)
         done_indices = torch.cat((flat_dones.new_tensor([-1], dtype=torch.int64), flat_dones.nonzero(as_tuple=False)[:, 0]))
         trajectory_lengths = (done_indices[1:] - done_indices[:-1])

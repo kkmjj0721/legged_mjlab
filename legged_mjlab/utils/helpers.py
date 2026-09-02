@@ -90,6 +90,8 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
         if args.seed is not None:
             cfg_train.seed = args.seed
         # alg runner parameters
+        if args.num_steps_per_env is not None:
+            cfg_train.runner.num_steps_per_env = args.num_steps_per_env
         if args.max_iterations is not None:
             cfg_train.runner.max_iterations = args.max_iterations
         if args.resume:
@@ -121,6 +123,7 @@ def get_args():
     parser.add_argument("--horovod", action="store_true", default=False, help="Use horovod for multi-gpu training")
     parser.add_argument("--rl_device", type=str, default="cuda:0", help="Device used by the RL algorithm, (cpu, gpu, cuda:0, cuda:1 etc..)")
     parser.add_argument("--num_envs", type=int, help="Number of environments to create. Overrides config file if provided.")
+    parser.add_argument("--num_steps_per_env", type=int, help="Number of rollout steps per environment. Overrides runner config if provided.")
     parser.add_argument("--seed", type=int, help="Random seed. Overrides config file if provided.")
     parser.add_argument("--max_iterations", type=int, help="Maximum number of training iterations.")
 
@@ -129,4 +132,3 @@ def get_args():
     args.sim_device = args.rl_device
     
     return args
-
