@@ -1,62 +1,66 @@
 import os
+import sys
 from datetime import datetime
-from typing import Tuple
 import torch
-import numpy as np
+
+from legged_mjlab.utils.paths import PROJECT_ROOT
+
+local_rsl_rl_path = os.path.join(PROJECT_ROOT.parent, "rsl_rl") 
+if os.path.exists(local_rsl_rl_path):
+    sys.path.insert(0, local_rsl_rl_path)
 
 from rsl_rl.runners import OnPolicyRunner
-from rsl_rl.runners import HIMOnPolicyRunner 
+try:
+    from rsl_rl.runners import HIMOnPolicyRunner
+except ImportError:
+    print("Warning: HIMOnPolicyRunner not found in local rsl_rl. Fallback to OnPolicyRunner.")
+    HIMOnPolicyRunner = OnPolicyRunner
 
 from legged_mjlab.wrappers import HIMRslRlWrapper, RslRlVecEnvWrapper
+from legged_mjlab.utils.helpers import get_args, class_to_dict, get_load_path, set_seed
 
-from legged_mjlab.utils.helpers import get_args, update_cfg_from_args, class_to_dict, get_load_path, set_seed
-from legged_mjlab.utils.paths import PROJECT_ROOT
 
 class TaskRegistry():
     def __init__(self):
         self.task_classes = {}
         self.env_cfgs = {}
         self.train_cfgs = {}
-    
+
     def register(self, name: str, task_class, env_cfg, train_cfg):
         self.task_classes[name] = task_class
         self.env_cfgs[name] = env_cfg
         self.train_cfgs[name] = train_cfg
-    
+
     def get_task_class(self, name: str):
         return self.task_classes[name]
-    
+
     def get_cfgs(self, name):
         train_cfg = self.train_cfgs[name]
         env_cfg = self.env_cfgs[name]
         env_cfg.seed = train_cfg.seed
         return env_cfg, train_cfg
-    
+
     def make_env(self, name, args=None, env_cfg=None):
-        """基于 mjlab 参数创建环境，并自动套上 rsl_rl wrapper"""
         if args is None:
             args = get_args()
             
-        if name in self.task_classes:
-            task_class = self.get_task_class(name)
-        else:
+        if name not in self.task_classes:
             raise ValueError(f"Task with name: {name} was not registered")
             
         if env_cfg is None:
             env_cfg, _ = self.get_cfgs(name)
             
-        # env_cfg, _ = update_cfg_from_args(env_cfg, None, args) # 根据你的 helpers 接口调整
         set_seed(env_cfg.seed)
 
-        render_mode = None if args.headless else "human"
-
-        env = task_class(
+        render_mode = None if getattr(args, "headless", False) else "human"
+        
+        env = self.task_classes[name](
             cfg=env_cfg,
             sim_device=args.sim_device,
             render_mode=render_mode,
             play=getattr(args, "play", False)
         )
-
+        
         runner_name = getattr(self.train_cfgs[name].runner, "runner_class_name", "OnPolicyRunner")
         if runner_name == "HIMOnPolicyRunner":
             env = HIMRslRlWrapper(
@@ -76,13 +80,8 @@ class TaskRegistry():
             args = get_args()
             
         if train_cfg is None:
-            if name is None:
-                raise ValueError("Either 'name' or 'train_cfg' must be not None")
             _, train_cfg = self.get_cfgs(name)
-        else:
-            if name is not None:
-                print(f"'train_cfg' provided -> Ignoring 'name={name}'")
-                
+
         if log_root == "default":
             log_root = os.path.join(PROJECT_ROOT, 'logs', train_cfg.runner.experiment_name)
             log_dir = os.path.join(log_root, datetime.now().strftime('%b%d_%H-%M-%S') + '_' + getattr(train_cfg.runner, 'run_name', ''))
@@ -92,15 +91,14 @@ class TaskRegistry():
             log_dir = os.path.join(log_root, datetime.now().strftime('%b%d_%H-%M-%S') + '_' + getattr(train_cfg.runner, 'run_name', ''))
         
         train_cfg_dict = class_to_dict(train_cfg)
-        
+
         runner_class_name = getattr(train_cfg.runner, "runner_class_name", "OnPolicyRunner")
         if runner_class_name == "HIMOnPolicyRunner":
             runner = HIMOnPolicyRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
         else:
             runner = OnPolicyRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
 
-        resume = train_cfg.runner.resume
-        if resume:
+        if train_cfg.runner.resume:
             resume_path = train_path if train_path is not None else get_load_path(log_root, load_run=train_cfg.runner.load_run, checkpoint=train_cfg.runner.checkpoint)
             print(f"Loading model from: {resume_path}")
             runner.load(resume_path)
