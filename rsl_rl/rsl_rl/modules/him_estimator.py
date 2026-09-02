@@ -56,6 +56,9 @@ class HIMEstimator(nn.Module):
         # Optimizer
         self.learning_rate = learning_rate
         self.optimizer = optim.Adam(self.parameters(), lr=self.learning_rate)
+        self.last_grad_norm = 0.0
+        self.last_target_vel_mean = torch.zeros(3)
+        self.last_pred_vel_mean = torch.zeros(3)
 
     def get_latent(self, obs_history):
         vel, z = self.encode(obs_history)
@@ -107,10 +110,13 @@ class HIMEstimator(nn.Module):
         swap_loss = -0.5 * (q_s * log_p_t + q_t * log_p_s).mean()
         estimation_loss = F.mse_loss(pred_vel, vel)
         losses = estimation_loss + swap_loss
+        self.last_target_vel_mean = vel.detach().mean(dim=0)
+        self.last_pred_vel_mean = pred_vel.detach().mean(dim=0)
 
         self.optimizer.zero_grad()
         losses.backward()
-        nn.utils.clip_grad_norm_(self.parameters(), self.max_grad_norm)
+        grad_norm = nn.utils.clip_grad_norm_(self.parameters(), self.max_grad_norm)
+        self.last_grad_norm = grad_norm.item()
         self.optimizer.step()
 
         return estimation_loss.item(), swap_loss.item()

@@ -77,6 +77,11 @@ class HIMPPO:
         self.lam = lam
         self.max_grad_norm = max_grad_norm
         self.use_clipped_value_loss = use_clipped_value_loss
+        self.last_ppo_grad_norm = 0.0
+        self.last_estimator_grad_norm = 0.0
+        self.last_command_mean = torch.zeros(3, device=self.device)
+        self.last_actual_base_vel_mean = torch.zeros(3, device=self.device)
+        self.last_estimated_base_vel_mean = torch.zeros(3, device=self.device)
 
     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape):
         self.storage = HIMRolloutStorage(num_envs, num_transitions_per_env, actor_obs_shape, critic_obs_shape, action_shape, self.device)
@@ -121,6 +126,13 @@ class HIMPPO:
         mean_surrogate_loss = 0
         mean_estimation_loss = 0
         mean_swap_loss = 0
+        ppo_grad_norm_sum = 0.0
+        estimator_grad_norm_sum = 0.0
+        command_sum = torch.zeros(3, device=self.device)
+        actual_base_vel_sum = torch.zeros(3, device=self.device)
+        estimated_base_vel_sum = torch.zeros(3, device=self.device)
+        metric_sample_count = 0
+        metric_batch_count = 0
         
         generator = self.storage.mini_batch_generator(self.num_mini_batches, self.num_learning_epochs)
 
@@ -151,6 +163,15 @@ class HIMPPO:
 
                 #Estimator Update
                 estimation_loss, swap_loss = self.actor_critic.estimator.update(obs_batch, next_critic_obs_batch, lr=self.learning_rate)
+                estimator_grad_norm_sum += self.actor_critic.estimator.last_grad_norm
+                # Use the first pass over each rollout sample; later epochs repeat samples.
+                if metric_batch_count < self.num_mini_batches:
+                    batch_size = obs_batch.shape[0]
+                    command_sum += obs_batch[:, :3].detach().sum(dim=0)
+                    actual_base_vel_sum += self.actor_critic.estimator.last_target_vel_mean * batch_size
+                    estimated_base_vel_sum += self.actor_critic.estimator.last_pred_vel_mean * batch_size
+                    metric_sample_count += batch_size
+                    metric_batch_count += 1
 
                 # Surrogate loss
                 ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
@@ -174,7 +195,8 @@ class HIMPPO:
                 # Gradient step
                 self.optimizer.zero_grad()
                 loss.backward()
-                nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
+                ppo_grad_norm = nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.max_grad_norm)
+                ppo_grad_norm_sum += ppo_grad_norm.item()
                 self.optimizer.step()
 
                 mean_value_loss += value_loss.item()
@@ -187,6 +209,12 @@ class HIMPPO:
         mean_surrogate_loss /= num_updates
         mean_estimation_loss /= num_updates
         mean_swap_loss /= num_updates
+        self.last_ppo_grad_norm = ppo_grad_norm_sum / num_updates
+        self.last_estimator_grad_norm = estimator_grad_norm_sum / num_updates
+        if metric_sample_count > 0:
+            self.last_command_mean = command_sum / metric_sample_count
+            self.last_actual_base_vel_mean = actual_base_vel_sum / metric_sample_count
+            self.last_estimated_base_vel_mean = estimated_base_vel_sum / metric_sample_count
         self.storage.clear()
 
         return mean_value_loss, mean_surrogate_loss, estimation_loss, swap_loss

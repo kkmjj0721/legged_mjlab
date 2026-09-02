@@ -6,7 +6,7 @@ from legged_mjlab.envs.base.legged_mjlab_config import LeggedMjlabCfg, LeggedMjl
 class HimGo2RoughCfg(LeggedMjlabCfg):
 
     class env( LeggedMjlabCfg.env ):
-            num_envs = 4096
+            num_envs = 1024
             num_one_step_observations = 45
             history_length = 6
             num_observations = num_one_step_observations * history_length
@@ -19,11 +19,11 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
             seed = 42
 
     class terrain( LeggedMjlabCfg.terrain ):
-            mesh_type = "generator"  # "plane" | "heightfield" | "trimesh" | "generator"
+            mesh_type = "plane"  # "plane" | "generator"
             horizontal_scale = 0.1  # [m]
             vertical_scale = 0.005  # [m]
             border_size = 25.0  # [m]
-            curriculum = True
+            curriculum = False
             static_friction = 1.0
             dynamic_friction = 1.0
             restitution = 0.0
@@ -100,40 +100,40 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
     class domain_rand( LeggedMjlabCfg.domain_rand ):
             # ---------------------------------- 动力学参数随机化 ---------------------------------- #
             # 基座负载质量
-            randomize_payload_mass = True
+            randomize_payload_mass = False
             payload_mass_range = [-1.0, 3.0]
     
             # 其他link质量
-            randomize_link_mass = True
+            randomize_link_mass = False
             link_mass_range = [0.9, 1.1]
     
             # 质心偏移
-            randomize_com_displacement = True
+            randomize_com_displacement = False
             com_displacement_range = [-0.05, 0.05]
     
             # 关节摩擦
-            randomize_joint_friction = True
+            randomize_joint_friction = False
             joint_friction_range = [0.01, 1.15]
             
             # 关节阻尼
-            randomize_joint_damping = True
+            randomize_joint_damping = False
             joint_damping_range = [0.3, 1.5]
     
             # 关节等效转动惯量
-            randomize_joint_armature = True
+            randomize_joint_armature = False
             joint_armature_range = [0.0001, 0.05]
     
             # ---------------------------------- 接触与外力随机化 ---------------------------------- #
             # 地面摩擦力
-            randomize_friction = True
+            randomize_friction = False
             friction_range = [0.3, 1.6]
             
             # 恢复系数
-            randomize_restitution = True
+            randomize_restitution = False
             restitution_range = [0., 0.4]
     
             # 随机推机器人
-            push_robots = True
+            push_robots = False
             push_interval_s = [4.0, 6.0]
             push_vel_xy = [-0.5, 0.5]
             push_vel_z = [-0.4, 0.4]
@@ -142,37 +142,37 @@ class HimGo2RoughCfg(LeggedMjlabCfg):
     
             # ---------------------------------- 控制器与执行器随机化 ------------------------------- #
             # 比例增益
-            randomize_pd_gains = True
+            randomize_pd_gains = False
             stiffness_multiplier_range = [0.8, 1.2]  
             damping_multiplier_range = [0.8, 1.2] 
     
             # 电机零位误差
-            randomize_motor_zero_offset = True
+            randomize_motor_zero_offset = False
             motor_zero_offset_range = [-0.035, 0.035]
 
             # 电机输出强度
-            randomize_motor_strength = True
+            randomize_motor_strength = False
             motor_strength_range = [0.8, 1.2]
             
             # ---------------------------------- 观测延迟随机化 ------------------------------------ #
             # 电机观测延迟
-            randomize_obs_motor_latency = True
+            randomize_obs_motor_latency = False
             range_obs_motor_latency = [1, 4]
 
             # IMU 观测延迟
-            randomize_obs_imu_latency = True
+            randomize_obs_imu_latency = False
             range_obs_imu_latency = [1, 3]
     
             # ---------------------------------- 动作指令延迟随机化 --------------------------------- #
             # 动作指令延迟
-            randomize_cmd_action_latency = True
+            randomize_cmd_action_latency = False
             range_cmd_action_latency = [1, 4]
             action_hold_prob = 0.3
 
             # ---------------------------------- 初始化姿态随机化 --------------------------------- #
             # 重置姿态
-            randomize_base_pose = True
-            base_pose_z_range = [-0.10, 0.10]
+            randomize_base_pose = False
+            base_pose_z_range = [-0.0, 0.10]
             base_pose_roll_range = [-0.0, 0.0]     
             base_pose_pitch_range = [-0.0, 0.0]
             # base_pose_roll_range = [-3.14, 3.14]     

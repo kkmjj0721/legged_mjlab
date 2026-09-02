@@ -59,7 +59,7 @@ class HimGo2Env(ManagerBasedRlEnv):
             device = sim_device,
             render_mode = render_mode,
         )
-
+        
     def _build_mjlab_managercfg(self, play = False, debug_vis = False) -> ManagerBasedRlEnvCfg:
         """ 将 HimGo2RoughCfg 转换为 ManagerBasedRlEnvCfg 以便于使用 mjlab 的管理器进行环境管理。
         """
@@ -621,10 +621,20 @@ class HimGo2Env(ManagerBasedRlEnv):
         """ 构建回合提前终止条件
             官方文档：https://mujocolab.github.io/mjlab/v1.6.0/source/terminations.html
         """
+        entity_name = self.robot_cfg.asset.name
+
         return {
             "time_out": TerminationTermCfg(
                 func = mdp.time_out,
                 time_out = True,
+            ),
+            "fell_over": TerminationTermCfg(
+                func = mdp.bad_orientation,
+                params = {
+                    "limit_angle": math.radians(70.0),
+                    "asset_cfg": SceneEntityCfg(entity_name),
+                },
+
             ),
         }
     
@@ -885,4 +895,3 @@ class HimGo2Env(ManagerBasedRlEnv):
         - soft_joint_pos_limits[:, asset_cfg.joint_ids, 1]
         ).clip(min=0.0)
         return torch.sum(out_of_limits, dim=1)
-

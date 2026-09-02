@@ -140,6 +140,11 @@ class HIMOnPolicyRunner:
                 self.alg.compute_returns(critic_obs)
                 
             mean_value_loss, mean_surrogate_loss, mean_estimation_loss, mean_swap_loss = self.alg.update()
+            mean_command = self.alg.last_command_mean
+            mean_actual_base_vel = self.alg.last_actual_base_vel_mean
+            mean_estimated_base_vel = self.alg.last_estimated_base_vel_mean
+            ppo_grad_norm = self.alg.last_ppo_grad_norm
+            estimator_grad_norm = self.alg.last_estimator_grad_norm
             stop = time.time()
             learn_time = stop - start
             if self.log_dir is not None:
@@ -171,6 +176,9 @@ class HIMOnPolicyRunner:
                 self.writer.add_scalar('Episode/' + key, value, locs['it'])
                 ep_string += f"""{f'Mean episode {key}:':>{pad}} {value:.4f}\n"""
         mean_std = self.alg.actor_critic.std.mean()
+        mean_command = locs['mean_command'].detach().cpu().tolist()
+        mean_actual_base_vel = locs['mean_actual_base_vel'].detach().cpu().tolist()
+        mean_estimated_base_vel = locs['mean_estimated_base_vel'].detach().cpu().tolist()
         fps = int(self.num_steps_per_env * self.env.num_envs / (locs['collection_time'] + locs['learn_time']))
 
         self.writer.add_scalar('Loss/value_function', locs['mean_value_loss'], locs['it'])
@@ -200,6 +208,11 @@ class HIMOnPolicyRunner:
                           f"""{'Estimation loss:':>{pad}} {locs['mean_estimation_loss']:.4f}\n"""
                           f"""{'Swap loss:':>{pad}} {locs['mean_swap_loss']:.4f}\n"""
                           f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
+                          f"""{'Rollout mean (first minibatch pass; command obs_t x/y/yaw (yaw angular velocity), scaled):':>{pad}} {mean_command[0]:.4f}, {mean_command[1]:.4f}, {mean_command[2]:.4f}\n"""
+                          f"""{'Rollout mean (first minibatch pass; actual base_lin_vel target, body-frame, scaled, next/t+1 x/y/z):':>{pad}} {mean_actual_base_vel[0]:.4f}, {mean_actual_base_vel[1]:.4f}, {mean_actual_base_vel[2]:.4f}\n"""
+                          f"""{'Rollout mean (first minibatch pass; estimated base_lin_vel prediction, body-frame, scaled, next/t+1 x/y/z):':>{pad}} {mean_estimated_base_vel[0]:.4f}, {mean_estimated_base_vel[1]:.4f}, {mean_estimated_base_vel[2]:.4f}\n"""
+                          f"""{'Update mean (all minibatches; PPO gradient clip_grad_norm_ return, pre-clipping global L2 norm):':>{pad}} {locs['ppo_grad_norm']:.4f}\n"""
+                          f"""{'Update mean (all minibatches; Estimator gradient clip_grad_norm_ return, pre-clipping global L2 norm):':>{pad}} {locs['estimator_grad_norm']:.4f}\n"""
                           f"""{'Mean reward:':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
                           f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n""")
                         #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
@@ -213,7 +226,12 @@ class HIMOnPolicyRunner:
                           f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
                           f"""{'Estimation loss:':>{pad}} {locs['mean_estimation_loss']:.4f}\n"""
                           f"""{'Swap loss:':>{pad}} {locs['mean_swap_loss']:.4f}\n"""
-                          f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n""")
+                          f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
+                          f"""{'Rollout mean (first minibatch pass; command obs_t x/y/yaw (yaw angular velocity), scaled):':>{pad}} {mean_command[0]:.4f}, {mean_command[1]:.4f}, {mean_command[2]:.4f}\n"""
+                          f"""{'Rollout mean (first minibatch pass; actual base_lin_vel target, body-frame, scaled, next/t+1 x/y/z):':>{pad}} {mean_actual_base_vel[0]:.4f}, {mean_actual_base_vel[1]:.4f}, {mean_actual_base_vel[2]:.4f}\n"""
+                          f"""{'Rollout mean (first minibatch pass; estimated base_lin_vel prediction, body-frame, scaled, next/t+1 x/y/z):':>{pad}} {mean_estimated_base_vel[0]:.4f}, {mean_estimated_base_vel[1]:.4f}, {mean_estimated_base_vel[2]:.4f}\n"""
+                          f"""{'Update mean (all minibatches; PPO gradient clip_grad_norm_ return, pre-clipping global L2 norm):':>{pad}} {locs['ppo_grad_norm']:.4f}\n"""
+                          f"""{'Update mean (all minibatches; Estimator gradient clip_grad_norm_ return, pre-clipping global L2 norm):':>{pad}} {locs['estimator_grad_norm']:.4f}\n""")
                         #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
                         #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
 

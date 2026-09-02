@@ -232,7 +232,7 @@ class LeggedMjlabCfgPPO(BaseConfig):
         actor_hidden_dims = [512, 256, 128]
         critic_hidden_dims = [512, 256, 128]
         activation = "elu"
-        obs_normalization = True
+        obs_normalization = False
 
     class algorithm:
         value_loss_coef = 1.0

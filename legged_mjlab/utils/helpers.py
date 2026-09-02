@@ -76,6 +76,48 @@ def get_load_path(root, load_run=-1, checkpoint=-1):
     load_path = os.path.join(load_run, model)
     return load_path
 
+def _get_num_envs(env_cfg):
+    if env_cfg is None:
+        return None
+    env_section = getattr(env_cfg, "env", None)
+    if env_section is not None and hasattr(env_section, "num_envs"):
+        return env_section.num_envs
+    return getattr(env_cfg, "num_envs", None)
+
+def _validate_rollout_cfg(env_cfg, cfg_train):
+    if cfg_train is None or not hasattr(cfg_train, "runner"):
+        return
+
+    runner_cfg = cfg_train.runner
+    if not hasattr(runner_cfg, "num_steps_per_env"):
+        return
+
+    num_steps_per_env = runner_cfg.num_steps_per_env
+    if num_steps_per_env <= 0:
+        raise ValueError(
+            f"runner.num_steps_per_env must be > 0, got {num_steps_per_env}."
+        )
+
+    algorithm_cfg = getattr(cfg_train, "algorithm", None)
+    num_envs = _get_num_envs(env_cfg)
+    if (
+        num_envs is None
+        or algorithm_cfg is None
+        or not hasattr(algorithm_cfg, "num_mini_batches")
+    ):
+        return
+
+    num_mini_batches = algorithm_cfg.num_mini_batches
+    total_rollout_samples = num_envs * num_steps_per_env
+    if total_rollout_samples < num_mini_batches:
+        raise ValueError(
+            "Rollout batch size must be >= algorithm.num_mini_batches to produce "
+            "non-empty PPO minibatches: "
+            f"env.num_envs ({num_envs}) * runner.num_steps_per_env "
+            f"({num_steps_per_env}) = {total_rollout_samples}, "
+            f"algorithm.num_mini_batches = {num_mini_batches}."
+        )
+
 def update_cfg_from_args(env_cfg, cfg_train, args):
     """ 用命令行参数覆盖默认配置的方法
     """
@@ -104,6 +146,8 @@ def update_cfg_from_args(env_cfg, cfg_train, args):
             cfg_train.runner.load_run = args.load_run
         if args.checkpoint is not None:
             cfg_train.runner.checkpoint = args.checkpoint
+
+    _validate_rollout_cfg(env_cfg, cfg_train)
 
 def get_args():
     """ 解析终端命令行输入参数的函数[

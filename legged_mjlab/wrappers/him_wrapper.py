@@ -50,6 +50,8 @@ class HIMRslRlWrapper(VecEnvWrapper):
         self._privileged_obs = None
         self._manual_reset = self._configure_manual_reset()
 
+        
+
     @staticmethod
     def _cfg_get(obj, name, default=None):
         if obj is None:
@@ -489,6 +491,14 @@ class HIMRslRlWrapper(VecEnvWrapper):
                 "done environments require reset-before terminal privileged obs; "
                 "disable native auto_reset or provide termination_privileged_obs in infos"
             )
+
+        if hasattr(self.env, "reward_manager") and hasattr(self.env.reward_manager, "_episode_sums"):
+            if done_ids.numel() > 0:
+                episode_dict = {}
+                for name, ep_sum in self.env.reward_manager._episode_sums.items():
+                    # 直接保存这批已结束环境的累计 Tensor，无 CPU 同步开销
+                    episode_dict[f"rew_{name}"] = ep_sum[done_ids].clone()
+                infos["episode"] = episode_dict
 
         if self._manual_reset and done_ids.numel() > 0:
             reset_actor, reset_privileged = self._reset_done_envs(done_ids)
