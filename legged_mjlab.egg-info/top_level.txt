@@ -1,2 +1,0 @@
-legged_mjlab
-rsl_rl
