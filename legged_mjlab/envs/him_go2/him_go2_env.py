@@ -59,7 +59,14 @@ class HimGo2Env(ManagerBasedRlEnv):
             device = sim_device,
             render_mode = render_mode,
         )
-        
+
+    def step(self, action):
+        obs, rewards, terminated, truncated, infos = super().step(action)
+        rewards_cfg = getattr(self.robot_cfg, "rewards", None)
+        if getattr(rewards_cfg, "only_positive_rewards", False):
+            rewards.clamp_(min=0.0)
+        return obs, rewards, terminated, truncated, infos
+    
     def _build_mjlab_managercfg(self, play = False, debug_vis = False) -> ManagerBasedRlEnvCfg:
         """ 将 HimGo2RoughCfg 转换为 ManagerBasedRlEnvCfg 以便于使用 mjlab 的管理器进行环境管理。
         """

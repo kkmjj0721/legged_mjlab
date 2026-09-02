@@ -8,6 +8,7 @@ MuJoCo Warp 和独立 RSL-RL 算法包。
 - [前言](docs/前言.md)：项目目标、参考边界和阅读顺序。
 - [uv 使用](docs/uv使用.md)：uv 项目、extras、lock 和日常工作流。
 - [安装与启动](docs/setup.md)：uv、CPU/GPU、Conda、打包状态和分层验证。
+- [训练实时可视化说明](docs/训练可视化说明.md)：说明 `him_go2` 如何在训练启动时选择 viewer、当前缺口和参考项目方案。
 
 ## 快速使用：
 

@@ -43,17 +43,18 @@ class TaskRegistry():
     def make_env(self, name, args=None, env_cfg=None):
         if args is None:
             args = get_args()
-            
+        
         if name not in self.task_classes:
             raise ValueError(f"Task with name: {name} was not registered")
-            
+        
         if env_cfg is None:
             env_cfg, _ = self.get_cfgs(name)
-            
-        set_seed(env_cfg.seed)
-
-        render_mode = None if getattr(args, "headless", False) else "human"
         
+        set_seed(env_cfg.seed)
+        
+        # 解耦：mjlab 只支持 None 或 rgb_array；Native/Viser 窗口由外部 viewer 控制，内部必须设为 None
+        render_mode = "rgb_array" if getattr(args, "video", False) else None
+
         env = self.task_classes[name](
             cfg=env_cfg,
             sim_device=args.sim_device,
@@ -97,6 +98,8 @@ class TaskRegistry():
             runner = HIMOnPolicyRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
         else:
             runner = OnPolicyRunner(env, train_cfg_dict, log_dir, device=args.rl_device)
+
+        runner.log_dir = log_dir
 
         if train_cfg.runner.resume:
             resume_path = train_path if train_path is not None else get_load_path(log_root, load_run=train_cfg.runner.load_run, checkpoint=train_cfg.runner.checkpoint)

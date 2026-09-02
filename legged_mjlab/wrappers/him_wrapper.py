@@ -543,6 +543,18 @@ class HIMRslRlWrapper(VecEnvWrapper):
         self._privileged_obs = privileged
         self.termination_ids = done_ids
         self.termination_privileged_obs = terminal_privileged
+
+        # 回放阶段供 viewer 调用，返回标准 5 元组，防止解包报错
+        if getattr(self.env, "play", False):
+            return (
+                history,
+                privileged,
+                rewards,
+                dones,
+                infos,
+            )
+
+        # 训练阶段保留 legacy HIMOnPolicyRunner 所需的 7 元组
         return (
             history,
             privileged,
